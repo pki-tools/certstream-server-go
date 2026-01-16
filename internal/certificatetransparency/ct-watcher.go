@@ -2,6 +2,8 @@ package certificatetransparency
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/csv"
 	"errors"
 	"fmt"
 	"io"
@@ -83,8 +85,8 @@ func (w *Watcher) Start() {
 // watchNewLogs monitors the ct log list for new logs and starts a worker for each new log found.
 // This method is blocking. It can be stopped by cancelling the context.
 func (w *Watcher) watchNewLogs() {
-	// Check for new logs once every hour
-	ticker := time.NewTicker(1 * time.Hour)
+	// Check for new logs and CCADB once every 6 hours
+	ticker := time.NewTicker(6 * time.Hour)
 	for {
 		select {
 		case <-ticker.C:
@@ -98,6 +100,17 @@ func (w *Watcher) watchNewLogs() {
 
 // updateLogs checks the transparency log list for new logs and adds new workers for those to the watcher.
 func (w *Watcher) updateLogs() {
+	// Download and parse CCADB data for CA ownership
+	ccadbURL := "https://ccadb.my.salesforce-sites.com/ccadb/AllCertificateRecordsCSVFormatv4"
+	log.Println("Downloading CCADB data for CA ownership...")
+	caOwners, err := DownloadAndParseCSV(ccadbURL, 18, 0, true)
+	if err != nil {
+		log.Printf("Failed to download CCADB data: %v\n", err)
+	} else {
+		CAOwners = caOwners
+		log.Printf("Successfully loaded %d CA owner mappings from CCADB\n", len(CAOwners))
+	}
+
 	// Get a list of urls of all CT logs
 	logList, err := getAllLogs()
 	if err != nil {
@@ -519,4 +532,81 @@ func normalizeCtlogURL(input string) string {
 	input = strings.TrimSuffix(input, "/")
 
 	return input
+}
+
+// DownloadAndParseCSV downloads a CSV file from the given URL and parses it into a map.
+// keyColIndex is the column index for the map key, valueColIndex is the column index for the map value.
+// If skipHeader is true, the first row is skipped.
+// The function retries up to 3 times with exponential backoff on network failures.
+func DownloadAndParseCSV(url string, keyColIndex, valueColIndex int, skipHeader bool) (map[string]string, error) {
+	var resp *http.Response
+	var err error
+
+	// Retry logic with exponential backoff
+	maxRetries := 3
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(1<<uint(attempt-1)) * 2 * time.Second
+			log.Printf("Retrying CCADB download in %v (attempt %d/%d)\n", backoff, attempt+1, maxRetries)
+			time.Sleep(backoff)
+		}
+
+		resp, err = http.Get(url)
+		if err == nil && resp.StatusCode == http.StatusOK {
+			break
+		}
+		if resp != nil {
+			resp.Body.Close()
+		}
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to download CSV after %d attempts: %w", maxRetries, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to download CSV: HTTP %d", resp.StatusCode)
+	}
+
+	// Parse CSV
+	reader := csv.NewReader(resp.Body)
+	records, err := reader.ReadAll()
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse CSV: %w", err)
+	}
+
+	result := make(map[string]string)
+	startRow := 0
+	if skipHeader && len(records) > 0 {
+		startRow = 1
+	}
+
+	for i := startRow; i < len(records); i++ {
+		record := records[i]
+		if len(record) <= keyColIndex {
+			continue
+		}
+
+		// For CCADB, the key is the base64-decoded SKI from column 18
+		// and the value is the CA Owner from column 0
+		key := record[keyColIndex]
+		var value string
+		if valueColIndex >= 0 && len(record) > valueColIndex {
+			value = record[valueColIndex]
+		} else if valueColIndex == 0 {
+			value = record[0]
+		}
+
+		// Decode base64 key (SKI) and convert to lowercase hex
+		if key != "" {
+			decoded, err := base64.StdEncoding.DecodeString(key)
+			if err == nil {
+				hexKey := fmt.Sprintf("%x", decoded)
+				result[hexKey] = value
+			}
+		}
+	}
+
+	return result, nil
 }
