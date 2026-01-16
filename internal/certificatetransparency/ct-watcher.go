@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -30,8 +31,53 @@ import (
 var (
 	errCreatingClient    = errors.New("failed to create JSON client")
 	errFetchingSTHFailed = errors.New("failed to fetch STH")
-	userAgent            = fmt.Sprintf("Certstream Server v%s (github.com/d-Rickyy-b/certstream-server-go)", config.Version)
+	userAgent            = getDefaultUserAgent()
 )
+
+// getDefaultUserAgent returns the default user agent string.
+func getDefaultUserAgent() string {
+	return fmt.Sprintf("Certstream Server v%s (github.com/pki-tools/certstream-server-go)", config.Version)
+}
+
+// loadCustomUserAgent checks for a 'certstream-ua' file in the executable's directory
+// and loads a custom user agent if present. Returns true if a custom UA was loaded.
+func loadCustomUserAgent() bool {
+	// Get the executable path
+	exePath, err := os.Executable()
+	if err != nil {
+		log.Printf("Could not determine executable path: %s\n", err)
+		return false
+	}
+
+	// Get the directory containing the executable
+	exeDir := filepath.Dir(exePath)
+	uaFilePath := filepath.Join(exeDir, "certstream-ua")
+
+	// Check if the file exists
+	if _, err := os.Stat(uaFilePath); os.IsNotExist(err) {
+		// File doesn't exist, use default
+		return false
+	}
+
+	// Read the file
+	content, err := os.ReadFile(uaFilePath)
+	if err != nil {
+		log.Printf("Error reading certstream-ua file: %s\n", err)
+		return false
+	}
+
+	// Trim whitespace and check if non-empty
+	customUA := strings.TrimSpace(string(content))
+	if customUA == "" {
+		log.Println("certstream-ua file is empty, using default user agent")
+		return false
+	}
+
+	// Update the global userAgent variable
+	userAgent = customUA
+	log.Printf("Loaded custom user agent from certstream-ua: %s\n", customUA)
+	return true
+}
 
 // Watcher describes a component that watches for new certificates in a CT log.
 type Watcher struct {
@@ -54,6 +100,9 @@ func NewWatcher(certChan chan models.Entry) *Watcher {
 // Start starts the watcher. This method is blocking.
 func (w *Watcher) Start() {
 	w.context, w.cancelFunc = context.WithCancel(context.Background())
+
+	// Load custom user agent from file if present
+	loadCustomUserAgent()
 
 	// Create new certChan if it doesn't exist yet
 	if w.certChan == nil {
