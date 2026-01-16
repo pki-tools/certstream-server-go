@@ -2,6 +2,8 @@ package certificatetransparency
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/csv"
 	"errors"
 	"fmt"
 	"io"
@@ -22,6 +24,7 @@ import (
 	"github.com/google/certificate-transparency-go/jsonclient"
 	"github.com/google/certificate-transparency-go/loglist3"
 	"github.com/google/certificate-transparency-go/scanner"
+	"github.com/google/certificate-transparency-go/x509"
 )
 
 var (
@@ -32,12 +35,13 @@ var (
 
 // Watcher describes a component that watches for new certificates in a CT log.
 type Watcher struct {
-	workers    []*worker
-	workersMu  sync.RWMutex
-	wg         sync.WaitGroup
-	context    context.Context
-	certChan   chan models.Entry
-	cancelFunc context.CancelFunc
+	workers       []*worker
+	tiledWorkers  []*tiledWorker
+	workersMu     sync.RWMutex
+	wg            sync.WaitGroup
+	context       context.Context
+	certChan      chan models.Entry
+	cancelFunc    context.CancelFunc
 }
 
 // NewWatcher creates a new Watcher.
@@ -83,8 +87,8 @@ func (w *Watcher) Start() {
 // watchNewLogs monitors the ct log list for new logs and starts a worker for each new log found.
 // This method is blocking. It can be stopped by cancelling the context.
 func (w *Watcher) watchNewLogs() {
-	// Check for new logs once every hour
-	ticker := time.NewTicker(1 * time.Hour)
+	// Check for new logs and CCADB once every 6 hours
+	ticker := time.NewTicker(6 * time.Hour)
 	for {
 		select {
 		case <-ticker.C:
@@ -98,6 +102,17 @@ func (w *Watcher) watchNewLogs() {
 
 // updateLogs checks the transparency log list for new logs and adds new workers for those to the watcher.
 func (w *Watcher) updateLogs() {
+	// Download and parse CCADB data for CA ownership
+	ccadbURL := "https://ccadb.my.salesforce-sites.com/ccadb/AllCertificateRecordsCSVFormatv4"
+	log.Println("Downloading CCADB data for CA ownership...")
+	caOwners, err := DownloadAndParseCSV(ccadbURL, 18, 0, true)
+	if err != nil {
+		log.Printf("Failed to download CCADB data: %v\n", err)
+	} else {
+		CAOwners = caOwners
+		log.Printf("Successfully loaded %d CA owner mappings from CCADB\n", len(CAOwners))
+	}
+
 	// Get a list of urls of all CT logs
 	logList, err := getAllLogs()
 	if err != nil {
@@ -135,6 +150,29 @@ func (w *Watcher) updateLogs() {
 
 	log.Printf("New ct logs found: %d\n", newCTs)
 
+	// Process tiled logs
+	newTiledCTs := 0
+	for _, operator := range logList.Operators {
+		// Iterate over each tiled log of the operator
+		for _, tiledLog := range operator.TiledLogs {
+			monitoringURL := tiledLog.MonitoringURL
+			desc := tiledLog.Description
+			normURL := normalizeCtlogURL(monitoringURL)
+
+			if tiledLog.State.LogStatus() == loglist3.RetiredLogStatus {
+				log.Printf("Skipping retired tiled CT log: %s\n", normURL)
+				continue
+			}
+
+			monitoredURLs[normURL] = struct{}{}
+			if w.addTiledLogIfNew(operator.Name, desc, tiledLog) {
+				newTiledCTs++
+			}
+		}
+	}
+
+	log.Printf("New tiled ct logs found: %d\n", newTiledCTs)
+
 	// Optionally stop workers for logs not in the monitoredURLs set
 	if *config.AppConfig.General.DropOldLogs {
 		removed := 0
@@ -146,10 +184,20 @@ func (w *Watcher) updateLogs() {
 				removed++
 			}
 		}
+
+		// Also stop tiled workers not in the list
+		for _, tiledWorker := range w.tiledWorkers {
+			normURL := normalizeCtlogURL(tiledWorker.monitoringURL)
+			if _, ok := monitoredURLs[normURL]; !ok {
+				log.Printf("Stopping tiled worker. CT URL not found in LogList or retired: '%s'\n", tiledWorker.monitoringURL)
+				tiledWorker.stop()
+				removed++
+			}
+		}
 		log.Printf("Removed ct logs: %d\n", removed)
 	}
 
-	log.Printf("Currently monitored ct logs: %d\n", len(w.workers))
+	log.Printf("Currently monitored ct logs: %d (regular) + %d (tiled) = %d total\n", len(w.workers), len(w.tiledWorkers), len(w.workers)+len(w.tiledWorkers))
 }
 
 // addLogIfNew checks if a log is already being watched and adds it if not.
@@ -200,6 +248,67 @@ func (w *Watcher) discardWorker(worker *worker) {
 	for i, wo := range w.workers {
 		if wo == worker {
 			w.workers = append(w.workers[:i], w.workers[i+1:]...)
+			return
+		}
+	}
+}
+
+// addTiledLogIfNew checks if a tiled log is already being watched and adds it if not.
+// Returns true if a new tiled log was added, false otherwise.
+func (w *Watcher) addTiledLogIfNew(operatorName, description string, tiledLog *loglist3.TiledLog) bool {
+	normURL := normalizeCtlogURL(tiledLog.MonitoringURL)
+
+	// Check if the tiled log is already being watched
+	for _, tiledWorker := range w.tiledWorkers {
+		workerURL := normalizeCtlogURL(tiledWorker.monitoringURL)
+		if workerURL == normURL {
+			return false
+		}
+	}
+
+	// Parse the public key
+	publicKey, err := x509.ParsePKIXPublicKey(tiledLog.Key)
+	if err != nil {
+		log.Printf("Failed to parse public key for tiled log '%s': %s\n", tiledLog.MonitoringURL, err)
+		return false
+	}
+
+	// Tiled log is not being watched, so add it
+	w.wg.Add(1)
+
+	lastCTIndex := int64(metrics.GetCTIndex(normURL))
+	tiledWorker := tiledWorker{
+		name:          description,
+		operatorName:  operatorName,
+		monitoringURL: tiledLog.MonitoringURL,
+		publicKey:     publicKey,
+		entryChan:     w.certChan,
+		ctIndex:       lastCTIndex,
+	}
+	w.tiledWorkers = append(w.tiledWorkers, &tiledWorker)
+	metrics.Init(operatorName, normURL)
+
+	// Start a goroutine for each tiled worker
+	go func() {
+		defer w.wg.Done()
+		tiledWorker.startDownloadingCerts(w.context)
+		w.discardTiledWorker(&tiledWorker)
+	}()
+
+	return true
+}
+
+// discardTiledWorker removes a tiled worker from the watcher's list of tiled workers.
+// This needs to be done when a tiled worker stops.
+func (w *Watcher) discardTiledWorker(worker *tiledWorker) {
+	log.Println("Removing tiled worker for CT log:", worker.monitoringURL)
+
+	w.workersMu.Lock()
+	defer w.workersMu.Unlock()
+
+	for i, wo := range w.tiledWorkers {
+		if wo == worker {
+			w.tiledWorkers = append(w.tiledWorkers[:i], w.tiledWorkers[i+1:]...)
 			return
 		}
 	}
@@ -519,4 +628,81 @@ func normalizeCtlogURL(input string) string {
 	input = strings.TrimSuffix(input, "/")
 
 	return input
+}
+
+// DownloadAndParseCSV downloads a CSV file from the given URL and parses it into a map.
+// keyColIndex is the column index for the map key, valueColIndex is the column index for the map value.
+// If skipHeader is true, the first row is skipped.
+// The function retries up to 3 times with exponential backoff on network failures.
+func DownloadAndParseCSV(url string, keyColIndex, valueColIndex int, skipHeader bool) (map[string]string, error) {
+	var resp *http.Response
+	var err error
+
+	// Retry logic with exponential backoff
+	maxRetries := 3
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(1<<uint(attempt-1)) * 2 * time.Second
+			log.Printf("Retrying CCADB download in %v (attempt %d/%d)\n", backoff, attempt+1, maxRetries)
+			time.Sleep(backoff)
+		}
+
+		resp, err = http.Get(url)
+		if err == nil && resp.StatusCode == http.StatusOK {
+			break
+		}
+		if resp != nil {
+			resp.Body.Close()
+		}
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to download CSV after %d attempts: %w", maxRetries, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to download CSV: HTTP %d", resp.StatusCode)
+	}
+
+	// Parse CSV
+	reader := csv.NewReader(resp.Body)
+	records, err := reader.ReadAll()
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse CSV: %w", err)
+	}
+
+	result := make(map[string]string)
+	startRow := 0
+	if skipHeader && len(records) > 0 {
+		startRow = 1
+	}
+
+	for i := startRow; i < len(records); i++ {
+		record := records[i]
+		if len(record) <= keyColIndex {
+			continue
+		}
+
+		// For CCADB, the key is the base64-decoded SKI from column 18
+		// and the value is the CA Owner from column 0
+		key := record[keyColIndex]
+		var value string
+		if valueColIndex >= 0 && len(record) > valueColIndex {
+			value = record[valueColIndex]
+		} else if valueColIndex == 0 {
+			value = record[0]
+		}
+
+		// Decode base64 key (SKI) and convert to lowercase hex
+		if key != "" {
+			decoded, err := base64.StdEncoding.DecodeString(key)
+			if err == nil {
+				hexKey := fmt.Sprintf("%x", decoded)
+				result[hexKey] = value
+			}
+		}
+	}
+
+	return result, nil
 }
