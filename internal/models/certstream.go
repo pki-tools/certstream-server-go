@@ -103,20 +103,32 @@ type Source struct {
 	NormalizedURL string `json:"-"`
 }
 
+type CertTypeExt struct {
+	SANCount         int `json:"san_count"`
+	SingleSANCount   int `json:"single_san_count"`
+	WildcardSANCount int `json:"wildcard_san_count"`
+}
+
 type LeafCert struct {
-	AllDomains         []string   `json:"all_domains"`
-	AsDER              string     `json:"as_der,omitempty"`
-	Extensions         Extensions `json:"extensions"`
-	Fingerprint        string     `json:"fingerprint"`
-	SHA1               string     `json:"sha1"`
-	SHA256             string     `json:"sha256"`
-	NotAfter           int64      `json:"not_after"`
-	NotBefore          int64      `json:"not_before"`
-	SerialNumber       string     `json:"serial_number"`
-	SignatureAlgorithm string     `json:"signature_algorithm"`
-	Subject            Subject    `json:"subject"`
-	Issuer             Subject    `json:"issuer"`
-	IsCA               bool       `json:"is_ca"`
+	AllDomains         []string    `json:"all_domains"`
+	AllRegDomains      []string    `json:"all_reg_domains"`
+	AsDER              string      `json:"as_der,omitempty"`
+	CAOwner            string      `json:"ca_owner"`
+	CertType           string      `json:"cert_type"`
+	CertTypeExt        CertTypeExt `json:"cert_type_ext"`
+	Extensions         Extensions  `json:"extensions"`
+	Fingerprint        string      `json:"fingerprint"`
+	SHA1               string      `json:"sha1"`
+	SHA256             string      `json:"sha256"`
+	IsCA               bool        `json:"is_ca"`
+	KeyType            string      `json:"key_type"`
+	NotAfter           int64       `json:"not_after"`
+	NotBefore          int64       `json:"not_before"`
+	SerialNumber       string      `json:"serial_number"`
+	SignatureAlgorithm string      `json:"signature_algorithm"`
+	Subject            Subject     `json:"subject"`
+	Issuer             Subject     `json:"issuer"`
+	ValidationType     string      `json:"validation_type"`
 }
 
 type Subject struct {
