@@ -2,15 +2,21 @@ package certificatetransparency
 
 import (
 	"bytes"
+	"crypto/dsa"
+	"crypto/ecdsa"
+	"crypto/rsa"
 	"crypto/sha1" //nolint:gosec
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash"
 	"log"
 	"math/big"
+	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,7 +25,11 @@ import (
 	ct "github.com/google/certificate-transparency-go"
 	"github.com/google/certificate-transparency-go/x509"
 	"github.com/google/certificate-transparency-go/x509/pkix"
+	psl "golang.org/x/net/publicsuffix"
 )
+
+// CAOwners stores the mapping of Authority Key Identifier to CA Owner name from CCADB.
+var CAOwners = make(map[string]string)
 
 // parseData converts a *ct.RawLogEntry struct into a certstream.Data struct by copying some values and calculating others.
 func parseData(entry *ct.RawLogEntry, operatorName, logName, ctURL string) (models.Data, error) {
@@ -156,7 +166,7 @@ func leafCertFromX509cert(cert x509.Certificate) models.LeafCert {
 	for _, extension := range cert.Extensions {
 		switch {
 		case extension.Id.Equal(x509.OIDExtensionAuthorityKeyId):
-			leafCert.Extensions.AuthorityKeyIdentifier = formatKeyID(cert.AuthorityKeyId)
+			leafCert.Extensions.AuthorityKeyIdentifier = formatKeyIDShort(cert.AuthorityKeyId)
 		case extension.Id.Equal(x509.OIDExtensionKeyUsage):
 			keyUsage := keyUsageToString(cert.KeyUsage)
 			leafCert.Extensions.KeyUsage = &keyUsage
@@ -206,6 +216,97 @@ func leafCertFromX509cert(cert x509.Certificate) models.LeafCert {
 		}
 	}
 
+	// Parse key type and size
+	leafCert.KeyType = parseKeyType(cert.PublicKeyAlgorithm, cert.RawSubjectPublicKeyInfo)
+
+	// Determine validation type (DV, OV, IV, EV)
+	leafCert.ValidationType = "OV" // default
+	PolicyOIDSString := fmt.Sprintf("%d", cert.PolicyIdentifiers)
+	if strings.Contains(PolicyOIDSString, "2.23.140.1.2.1") {
+		leafCert.ValidationType = "DV"
+	} else if strings.Contains(PolicyOIDSString, "2.23.140.1.1") {
+		leafCert.ValidationType = "EV"
+	} else if strings.Contains(PolicyOIDSString, "2.23.140.1.2.2") {
+		leafCert.ValidationType = "OV"
+	} else if strings.Contains(PolicyOIDSString, "2.23.140.1.2.3") {
+		leafCert.ValidationType = "IV"
+	}
+
+	// Additional checks for validation type
+	if leafCert.Subject.O == nil || *leafCert.Subject.O == "" {
+		leafCert.ValidationType = "DV"
+	}
+
+	// Check for jurisdictionC OID to identify EV (1.3.6.1.4.1.311.60.2.1.3)
+	for _, name := range cert.Subject.Names {
+		if name.Type.String() == "1.3.6.1.4.1.311.60.2.1.3" {
+			leafCert.ValidationType = "EV"
+			break
+		}
+	}
+
+	// Determine cert type and count wildcards
+	wildcardCount := 0
+	for _, domain := range leafCert.AllDomains {
+		if strings.Contains(domain, "*") {
+			wildcardCount++
+		}
+	}
+
+	if wildcardCount > 0 {
+		leafCert.CertType = "Wildcard"
+	} else if len(leafCert.AllDomains) > 2 {
+		leafCert.CertType = "Multi"
+	} else {
+		leafCert.CertType = "Single"
+	}
+
+	leafCert.CertTypeExt.SANCount = len(leafCert.AllDomains)
+	leafCert.CertTypeExt.WildcardSANCount = wildcardCount
+	leafCert.CertTypeExt.SingleSANCount = leafCert.CertTypeExt.SANCount - leafCert.CertTypeExt.WildcardSANCount
+
+	// Extract registered domains using PSL
+	regDomainSlice := []string{}
+	for _, domain := range leafCert.AllDomains {
+		// Check if it's an IP address
+		isIP := net.ParseIP(domain)
+		if isIP == nil {
+			// Extract eTLD+1 using PSL
+			regDomain, err := psl.EffectiveTLDPlusOne(domain)
+			if err != nil {
+				regDomainSlice = append(regDomainSlice, domain)
+			} else {
+				regDomainSlice = append(regDomainSlice, regDomain)
+			}
+		} else {
+			regDomainSlice = append(regDomainSlice, domain)
+		}
+	}
+
+	// De-duplicate registered domains
+	seenRegDomain := map[string]bool{}
+	var regDomainResult []string
+	for v := range regDomainSlice {
+		if !seenRegDomain[regDomainSlice[v]] {
+			seenRegDomain[regDomainSlice[v]] = true
+			regDomainResult = append(regDomainResult, regDomainSlice[v])
+		}
+	}
+	leafCert.AllRegDomains = regDomainResult
+
+	// CA Owner lookup (will be populated by CCADB data)
+	if len(cert.AuthorityKeyId) > 0 {
+		leafAKI := *formatKeyIDShort(cert.AuthorityKeyId)
+		caOwnerCheck, ok := CAOwners[leafAKI]
+		if ok {
+			leafCert.CAOwner = caOwnerCheck
+		} else {
+			leafCert.CAOwner = "unknown"
+		}
+	} else {
+		leafCert.CAOwner = "unknown"
+	}
+
 	return leafCert
 }
 
@@ -220,33 +321,10 @@ func buildSubject(certSubject pkix.Name) models.Subject {
 		ST: parseName(certSubject.StreetAddress),
 	}
 
-	var aggregated string
-
-	if subject.C != nil {
-		aggregated += fmt.Sprintf("/C=%s", *subject.C)
-	}
-
-	if subject.CN != nil {
-		aggregated += fmt.Sprintf("/CN=%s", *subject.CN)
-	}
-
-	if subject.L != nil {
-		aggregated += fmt.Sprintf("/L=%s", *subject.L)
-	}
-
-	if subject.O != nil {
-		aggregated += fmt.Sprintf("/O=%s", *subject.O)
-	}
-
-	if subject.OU != nil {
-		aggregated += fmt.Sprintf("/OU=%s", *subject.OU)
-	}
-
-	if subject.ST != nil {
-		aggregated += fmt.Sprintf("/ST=%s", *subject.ST)
-	}
-
-	subject.Aggregated = &aggregated
+	// Convert to JSON format for aggregated field
+	aggregatedJSON, _ := json.Marshal(ParseNameJSON(certSubject))
+	jsonSubject := string(aggregatedJSON)
+	subject.Aggregated = &jsonSubject
 
 	return subject
 }
@@ -262,6 +340,14 @@ func formatKeyID(keyID []byte) *string {
 
 	digest = strings.TrimLeft(digest, ":")
 	digest = fmt.Sprintf("keyid:%s", digest)
+
+	return &digest
+}
+
+// formatKeyIDShort transforms the AuthorityKeyIdentifier to be more readable.
+func formatKeyIDShort(keyID []byte) *string {
+	tmp := hex.EncodeToString(keyID)
+	digest := strings.ToLower(tmp)
 
 	return &digest
 }
@@ -290,6 +376,78 @@ func parseName(input []string) *string {
 	}
 
 	return &result
+}
+
+// parseKeyType determines the public key algorithm and calculates key size.
+func parseKeyType(keyAlg x509.PublicKeyAlgorithm, rawKey []byte) string {
+	switch keyAlg {
+	case 1: // RSA
+		rsaKey, err := x509.ParsePKIXPublicKey(rawKey)
+		if err == nil {
+			if rsaPub, ok := rsaKey.(*rsa.PublicKey); ok {
+				KeySize := rsaPub.N
+				keySizeBits := strconv.Itoa(KeySize.BitLen())
+				return "RSA" + keySizeBits
+			}
+		}
+		return "RSA"
+	case 2: // DSA
+		dsaKey, err := x509.ParsePKIXPublicKey(rawKey)
+		if err == nil {
+			if dsaPub, ok := dsaKey.(*dsa.PublicKey); ok {
+				KeySize := dsaPub.P
+				keySizeBits := strconv.Itoa(KeySize.BitLen())
+				return "DSA" + keySizeBits
+			}
+		}
+		return "DSA"
+	case 3: // ECDSA
+		ecdsaKey, err := x509.ParsePKIXPublicKey(rawKey)
+		if err == nil {
+			if ecdsaPub, ok := ecdsaKey.(*ecdsa.PublicKey); ok {
+				keySizeBits := strconv.Itoa(ecdsaPub.Curve.Params().BitSize)
+				return "ECDSA" + keySizeBits
+			}
+		}
+		return "ECDSA"
+	default:
+		return "Unknown"
+	}
+}
+
+// JSONName represents a pkix.Name in JSON format.
+type JSONName struct {
+	CommonName         string        `json:"common_name,omitempty"`
+	SerialNumber       string        `json:"serial_number,omitempty"`
+	Country            string        `json:"country,omitempty"`
+	Organization       string        `json:"organization,omitempty"`
+	OrganizationalUnit string        `json:"organizational_unit,omitempty"`
+	Locality           string        `json:"locality,omitempty"`
+	Province           string        `json:"province,omitempty"`
+	StreetAddress      string        `json:"street_address,omitempty"`
+	PostalCode         string        `json:"postal_code,omitempty"`
+	Names              []interface{} `json:"names,omitempty"`
+}
+
+// ParseNameJSON converts a pkix.Name to JSONName.
+func ParseNameJSON(name pkix.Name) JSONName {
+	n := JSONName{
+		CommonName:         name.CommonName,
+		SerialNumber:       name.SerialNumber,
+		Country:            strings.Join(name.Country, ","),
+		Organization:       strings.Join(name.Organization, ","),
+		OrganizationalUnit: strings.Join(name.OrganizationalUnit, ","),
+		Locality:           strings.Join(name.Locality, ","),
+		Province:           strings.Join(name.Province, ","),
+		StreetAddress:      strings.Join(name.StreetAddress, ","),
+		PostalCode:         strings.Join(name.PostalCode, ","),
+	}
+
+	for i := range name.Names {
+		n.Names = append(n.Names, name.Names[i].Value)
+	}
+
+	return n
 }
 
 // calculateHash takes a hash.Hash implementation and calculates the hash of the given data.
@@ -329,41 +487,41 @@ func calculateSHA256(data []byte) string {
 func parseSignatureAlgorithm(signatureAlgoritm x509.SignatureAlgorithm) string {
 	switch signatureAlgoritm {
 	case x509.MD2WithRSA:
-		return "md2, rsa"
+		return "MD2WithRSA"
 	case x509.MD5WithRSA:
-		return "md5, rsa"
+		return "MD5WithRSA"
 	case x509.SHA1WithRSA:
-		return "sha1, rsa"
+		return "SHA1WithRSA"
 	case x509.SHA256WithRSA:
-		return "sha256, rsa"
+		return "SHA256WithRSA"
 	case x509.SHA384WithRSA:
-		return "sha384, rsa"
+		return "SHA384WithRSA"
 	case x509.SHA512WithRSA:
-		return "sha512, rsa"
+		return "SHA512WithRSA"
 	case x509.SHA256WithRSAPSS:
-		return "sha256, rsa-pss"
+		return "SHA256WithRSAPSS"
 	case x509.SHA384WithRSAPSS:
-		return "sha384, rsa-pss"
+		return "SHA384WithRSAPSS"
 	case x509.SHA512WithRSAPSS:
-		return "sha512, rsa-pss"
+		return "SHA512WithRSAPSS"
 	case x509.DSAWithSHA1:
-		return "dsa, sha1"
+		return "DSAWithSHA1"
 	case x509.DSAWithSHA256:
-		return "dsa, sha256"
+		return "DSAWithSHA256"
 	case x509.ECDSAWithSHA1:
-		return "ecdsa, sha1"
+		return "ECDSAWithSHA1"
 	case x509.ECDSAWithSHA256:
-		return "ecdsa, sha256"
+		return "ECDSAWithSHA256"
 	case x509.ECDSAWithSHA384:
-		return "ecdsa, sha384"
+		return "ECDSAWithSHA384"
 	case x509.ECDSAWithSHA512:
-		return "ecdsa, sha512"
+		return "ECDSAWithSHA512"
 	case x509.PureEd25519:
-		return "ed25519"
+		return "Ed25519"
 	case x509.UnknownSignatureAlgorithm:
 		fallthrough
 	default:
-		return "unknown"
+		return "Unknown"
 	}
 }
 
