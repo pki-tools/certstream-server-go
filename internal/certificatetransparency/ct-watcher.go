@@ -156,10 +156,14 @@ func (w *Watcher) updateLogs() {
 	log.Println("Downloading CCADB data for CA ownership...")
 	caOwners, err := DownloadAndParseCSV(ccadbURL, 18, 0, true)
 	if err != nil {
-		log.Printf("Failed to download CCADB data: %v\n", err)
+		log.Printf("Failed to download CCADB data: %v (keeping existing CA owner data)\n", err)
+	} else if len(caOwners) == 0 {
+		log.Printf("CCADB data is empty or invalid (keeping existing CA owner data)\n")
 	} else {
+		// Only update if we got valid data with at least some entries
+		oldCount := len(CAOwners)
 		CAOwners = caOwners
-		log.Printf("Successfully loaded %d CA owner mappings from CCADB\n", len(CAOwners))
+		log.Printf("Successfully loaded %d CA owner mappings from CCADB (previous: %d)\n", len(CAOwners), oldCount)
 	}
 
 	// Get a list of urls of all CT logs
@@ -721,12 +725,24 @@ func DownloadAndParseCSV(url string, keyColIndex, valueColIndex int, skipHeader 
 		return nil, fmt.Errorf("failed to parse CSV: %w", err)
 	}
 
+	// Validate CSV has minimum expected data
+	minRecords := 10 // CCADB should have hundreds of CAs, so 10 is a very low bar
+	if len(records) < minRecords {
+		return nil, fmt.Errorf("CSV has too few records (%d), expected at least %d - possible format change or corrupted download", len(records), minRecords)
+	}
+
+	// Validate CSV has expected columns (we need at least keyColIndex+1 columns)
+	if len(records) > 0 && len(records[0]) <= keyColIndex {
+		return nil, fmt.Errorf("CSV missing expected columns (has %d columns, need at least %d) - possible format change", len(records[0]), keyColIndex+1)
+	}
+
 	result := make(map[string]string)
 	startRow := 0
 	if skipHeader && len(records) > 0 {
 		startRow = 1
 	}
 
+	validEntries := 0
 	for i := startRow; i < len(records); i++ {
 		record := records[i]
 		if len(record) <= keyColIndex {
@@ -749,8 +765,14 @@ func DownloadAndParseCSV(url string, keyColIndex, valueColIndex int, skipHeader 
 			if err == nil {
 				hexKey := fmt.Sprintf("%x", decoded)
 				result[hexKey] = value
+				validEntries++
 			}
 		}
+	}
+
+	// Ensure we parsed at least some valid entries
+	if validEntries == 0 {
+		return nil, fmt.Errorf("no valid entries parsed from CSV - possible format change or data issue")
 	}
 
 	return result, nil
