@@ -60,6 +60,7 @@ type Config struct {
 		DropOldLogs    *bool       `yaml:"drop_old_logs"`
 		Recovery       struct {
 			Enabled     bool   `yaml:"enabled"`
+			StartAtHead bool   `yaml:"start_at_head"`
 			CTIndexFile string `yaml:"ct_index_file"`
 		} `yaml:"recovery"`
 	}
@@ -244,6 +245,11 @@ func validateConfig(config *Config) bool {
 		log.Println("drop_old_logs is not set, defaulting to true")
 		defaultCleanup := true
 		config.General.DropOldLogs = &defaultCleanup
+	}
+
+	if config.General.Recovery.StartAtHead && !config.General.Recovery.Enabled {
+		log.Println("start_at_head requires recovery to be enabled. Enabling recovery.")
+		config.General.Recovery.Enabled = true
 	}
 
 	if config.General.Recovery.Enabled && config.General.Recovery.CTIndexFile == "" {

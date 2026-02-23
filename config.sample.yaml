@@ -54,6 +54,12 @@ general:
     # Depending on your server's performance and network connection, this could be up to 10.000 certificates per second.
     # Make sure your infrastructure can handle this!
     enabled: true
+    # If start_at_head is true and there is no ct_index.json (or no saved index for a log), the server will
+    # begin from the current STH/tree size instead of index 0. Recovery is still enabled, so positions are
+    # saved and restored on restart. This avoids the massive initial download that occurs with recovery
+    # enabled alone, while still providing resumption on subsequent restarts.
+    # Requires recovery to be enabled (will auto-enable it if not).
+    start_at_head: false
     # Path to the file where indices are stored. Be aware that a temp file in the same path with the same name and ".tmp" as suffix will be created.
     # If there are no write permissions to the path, the server will not be able to store the indices.
     ct_index_file: "./ct_index.json"
