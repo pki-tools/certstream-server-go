@@ -116,7 +116,12 @@ func (w *Watcher) Start() {
 			return
 		}
 		// Load Saved CT Indexes
-		metrics.LoadCTIndex(ctIndexFilePath)
+		fileLoaded := metrics.LoadCTIndex(ctIndexFilePath)
+		if !fileLoaded && config.AppConfig.General.Recovery.StartAtHead {
+			log.Println("No ct_index.json found with start_at_head enabled; workers will start from current STH")
+		} else if !fileLoaded {
+			log.Println("No ct_index.json found; workers will start from index 0")
+		}
 		// Save CTIndexes at regular intervals
 		go metrics.SaveCertIndexesAtInterval(time.Second*30, ctIndexFilePath) // save indexes every X seconds
 	}
@@ -511,7 +516,8 @@ func (w *worker) runWorker(ctx context.Context) error {
 
 	// If recovery is enabled, we start at the saved index. Otherwise, we start at the latest STH.
 	recoveryEnabled := config.AppConfig.General.Recovery.Enabled
-	if !recoveryEnabled {
+	startAtHead := config.AppConfig.General.Recovery.StartAtHead
+	if !recoveryEnabled || (startAtHead && w.ctIndex == 0) {
 		sth, getSTHerr := jsonClient.GetSTH(ctx)
 		if getSTHerr != nil {
 			// TODO this can happen due to a 429 error. We should retry the request
@@ -520,6 +526,9 @@ func (w *worker) runWorker(ctx context.Context) error {
 		}
 		// Start at the latest STH to skip all the past certificates
 		w.ctIndex = sth.TreeSize
+		if startAtHead && recoveryEnabled {
+			log.Printf("No saved index for '%s', starting from current STH: %d\n", w.ctURL, w.ctIndex)
+		}
 	}
 
 	certScanner := scanner.NewScanner(jsonClient, scanner.ScannerOptions{

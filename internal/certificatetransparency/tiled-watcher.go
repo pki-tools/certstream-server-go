@@ -111,9 +111,13 @@ func (tw *tiledWorker) runWorker(ctx context.Context) error {
 
 	// If recovery is not enabled, start from the current tree size
 	recoveryEnabled := config.AppConfig.General.Recovery.Enabled
+	startAtHead := config.AppConfig.General.Recovery.StartAtHead
 	if !recoveryEnabled {
 		tw.ctIndex = treeSize
 		log.Printf("Starting tiled log '%s' from tree size %d (skipping past entries)\n", tw.monitoringURL, tw.ctIndex)
+	} else if startAtHead && tw.ctIndex == 0 {
+		tw.ctIndex = treeSize
+		log.Printf("No saved index for tiled log '%s', starting from current tree size %d (start_at_head)\n", tw.monitoringURL, tw.ctIndex)
 	} else {
 		log.Printf("Starting tiled log '%s' from saved index %d (tree size: %d)\n", tw.monitoringURL, tw.ctIndex, treeSize)
 	}
