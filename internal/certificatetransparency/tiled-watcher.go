@@ -20,6 +20,10 @@ import (
 	"github.com/google/certificate-transparency-go/x509"
 )
 
+// tiledBatchSize is the maximum number of entries to process per polling tick.
+// Limiting batch size prevents a single log from monopolising the entry channel during catch-up.
+const tiledBatchSize = 500
+
 // tiledWorker processes a single tiled (Static CT API) log.
 type tiledWorker struct {
 	name          string
@@ -52,7 +56,6 @@ func (tw *tiledWorker) startDownloadingCerts(ctx context.Context) {
 	tw.mu.Unlock()
 
 	for {
-		log.Printf("Starting tiled worker for CT log: %s\n", tw.monitoringURL)
 		workerErr := tw.runWorker(ctx)
 		if workerErr != nil {
 			if strings.Contains(workerErr.Error(), "no such host") {
@@ -65,12 +68,9 @@ func (tw *tiledWorker) startDownloadingCerts(ctx context.Context) {
 		// Check if the context was cancelled
 		select {
 		case <-ctx.Done():
-			log.Printf("Context was cancelled; Stopping tiled worker for '%s'\n", tw.monitoringURL)
 			return
 		default:
-			log.Printf("Tiled worker for '%s' sleeping for 5 seconds due to error\n", tw.monitoringURL)
 			time.Sleep(5 * time.Second)
-			log.Printf("Restarting tiled worker for '%s'\n", tw.monitoringURL)
 			continue
 		}
 	}
@@ -144,33 +144,40 @@ func (tw *tiledWorker) runWorker(ctx context.Context) error {
 				continue
 			}
 
-			log.Printf("Tiled log '%s' has new entries: %d -> %d\n", tw.monitoringURL, tw.ctIndex, newTreeSize)
-
-			// Fetch new entries (checkpoint.Tree is already the tree we need)
+			// Fetch new entries in batches so one log can't starve others during catch-up.
 			startIndex := tw.ctIndex
+			batchCount := 0
 			for index, entry := range client.Entries(ctx, checkpoint.Tree, startIndex) {
 				if entry == nil {
 					continue
 				}
 
-				// Process the entry
 				certstreamEntry, parseErr := tw.parseTiledEntry(entry, index)
 				if parseErr != nil {
 					log.Printf("Error parsing tiled entry at index %d: %s\n", index, parseErr)
 					continue
 				}
 
-				// Send to entry channel
-				tw.entryChan <- certstreamEntry
+				// Non-blocking context-aware send so a full channel can't freeze this goroutine
+				// and prevent context cancellation from propagating.
+				select {
+				case tw.entryChan <- certstreamEntry:
+				case <-ctx.Done():
+					return nil
+				}
 
-				// Update index
 				tw.ctIndex = index + 1
 
-				// Update metrics
 				if entry.IsPrecert {
 					atomic.AddInt64(&processedPrecerts, 1)
 				} else {
 					atomic.AddInt64(&processedCerts, 1)
+				}
+
+				batchCount++
+				if batchCount >= tiledBatchSize {
+					// Yield; next tick will continue from tw.ctIndex.
+					break
 				}
 			}
 

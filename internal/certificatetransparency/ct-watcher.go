@@ -436,11 +436,13 @@ type worker struct {
 	mu           sync.Mutex
 	running      bool
 	cancel       context.CancelFunc
+	ctx          context.Context
 }
 
 // startDownloadingCerts starts downloading certificates from the CT log. This method is blocking.
 func (w *worker) startDownloadingCerts(ctx context.Context) {
 	ctx, w.cancel = context.WithCancel(ctx)
+	w.ctx = ctx
 
 	// Normalize CT URL. We remove trailing slashes and prepend "https://" if it's not already there.
 	w.ctURL = strings.TrimRight(w.ctURL, "/")
@@ -564,7 +566,11 @@ func (w *worker) foundCertCallback(rawEntry *ct.RawLogEntry) {
 	}
 
 	entry.Data.UpdateType = "X509LogEntry"
-	w.entryChan <- entry
+	select {
+	case w.entryChan <- entry:
+	case <-w.ctx.Done():
+		return
+	}
 
 	atomic.AddInt64(&processedCerts, 1)
 }
@@ -578,7 +584,11 @@ func (w *worker) foundPrecertCallback(rawEntry *ct.RawLogEntry) {
 	}
 
 	entry.Data.UpdateType = "PrecertLogEntry"
-	w.entryChan <- entry
+	select {
+	case w.entryChan <- entry:
+	case <-w.ctx.Done():
+		return
+	}
 
 	atomic.AddInt64(&processedPrecerts, 1)
 }
@@ -588,8 +598,7 @@ func (w *worker) foundPrecertCallback(rawEntry *ct.RawLogEntry) {
 func certHandler(entryChan chan models.Entry) {
 	var processed int64
 
-	for {
-		entry := <-entryChan
+	for entry := range entryChan {
 		processed++
 
 		if processed%1000 == 0 {
@@ -625,7 +634,7 @@ func getGoogleLogList() (loglist3.LogList, error) {
 
 	bodyBytes, readErr := io.ReadAll(resp.Body)
 	if readErr != nil {
-		log.Panic(readErr)
+		return loglist3.LogList{}, fmt.Errorf("failed to read loglist response body: %w", readErr)
 	}
 
 	allLogs, parseErr := loglist3.NewFromJSON(bodyBytes)
