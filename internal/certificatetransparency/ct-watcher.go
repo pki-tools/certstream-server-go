@@ -132,6 +132,7 @@ func (w *Watcher) Start() {
 	log.Println("Started CT watcher")
 	go certHandler(w.certChan)
 	go w.watchNewLogs()
+	StartTreeSizePoller(w.context, 3*time.Minute)
 
 	// Wait for all workers to finish
 	w.wg.Wait()
@@ -284,6 +285,7 @@ func (w *Watcher) addLogIfNew(operatorName, description, url string) bool {
 	}
 	w.workers = append(w.workers, &ctWorker)
 	metrics.Init(operatorName, normURL)
+	registerLogForStatus(url, description, operatorName, LogTypeRegular, nil)
 
 	// Start a goroutine for each worker
 	go func() {
@@ -345,6 +347,7 @@ func (w *Watcher) addTiledLogIfNew(operatorName, description string, tiledLog *l
 	}
 	w.tiledWorkers = append(w.tiledWorkers, &tiledWorker)
 	metrics.Init(operatorName, normURL)
+	registerLogForStatus(tiledLog.MonitoringURL, description, operatorName, LogTypeTiled, publicKey)
 
 	// Start a goroutine for each tiled worker
 	go func() {
