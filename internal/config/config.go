@@ -35,6 +35,7 @@ type BufferSizes struct {
 	Websocket        int `yaml:"websocket"`
 	CTLog            int `yaml:"ctlog"`
 	BroadcastManager int `yaml:"broadcastmanager"`
+	CertChan         int `yaml:"certchan"`
 }
 
 type Config struct {
@@ -238,6 +239,10 @@ func validateConfig(config *Config) bool {
 
 	if config.General.BufferSizes.BroadcastManager <= 0 {
 		config.General.BufferSizes.BroadcastManager = 10000
+	}
+
+	if config.General.BufferSizes.CertChan <= 0 {
+		config.General.BufferSizes.CertChan = 2000
 	}
 
 	// If the cleanup flag is not set, default to true

@@ -106,7 +106,7 @@ func (w *Watcher) Start() {
 
 	// Create new certChan if it doesn't exist yet
 	if w.certChan == nil {
-		w.certChan = make(chan models.Entry, 5000)
+		w.certChan = make(chan models.Entry, config.AppConfig.General.BufferSizes.CertChan)
 	}
 
 	if config.AppConfig.General.Recovery.Enabled {

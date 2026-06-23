@@ -90,22 +90,37 @@ func (bm *BroadcastManager) GetSkippedCerts() map[string]uint64 {
 // broadcaster is run in a goroutine and handles the dispatching of entries to clients.
 func (bm *BroadcastManager) broadcaster() {
 	for {
-		var data []byte
-
 		entry := <-bm.Broadcast
-		dataLite := entry.JSONLite()
-		dataFull := entry.JSON()
-		dataDomain := entry.JSONDomains()
 
 		bm.clientLock.RLock()
 
+		if len(bm.clients) == 0 {
+			bm.clientLock.RUnlock()
+			continue
+		}
+
+		// Compute only the JSON variants actually needed by connected clients,
+		// avoiding unnecessary allocations and GC pressure when subscriber types
+		// are sparse or zero.
+		var dataLite, dataFull, dataDomain []byte
+
 		for _, c := range bm.clients {
+			var data []byte
 			switch c.subType {
 			case SubTypeLite:
+				if dataLite == nil {
+					dataLite = entry.JSONLite()
+				}
 				data = dataLite
 			case SubTypeFull:
+				if dataFull == nil {
+					dataFull = entry.JSON()
+				}
 				data = dataFull
 			case SubTypeDomain:
+				if dataDomain == nil {
+					dataDomain = entry.JSONDomains()
+				}
 				data = dataDomain
 			default:
 				log.Printf("Unknown subscription type '%d' for client '%s'. Skipping this client!\n", c.subType, c.name)
