@@ -39,6 +39,9 @@ func NewCertstreamServer(config config.Config) (*Certstream, error) {
 	webserver := web.NewWebsocketServer(config.Webserver.ListenAddr, config.Webserver.ListenPort, config.Webserver.CertPath, config.Webserver.CertKeyPath)
 	cs.webserver = webserver
 
+	// Register the CT log status dashboard
+	webserver.RegisterHTTPHandler("/log-status", logStatusHandler)
+
 	// Setup metrics server
 	cs.setupMetrics(webserver)
 

@@ -36,6 +36,11 @@ type WebServer struct {
 	keyPath   string
 }
 
+// RegisterHTTPHandler registers a plain HTTP handler at the given path on the webserver.
+func (ws *WebServer) RegisterHTTPHandler(pattern string, handler http.HandlerFunc) {
+	ws.routes.HandleFunc(pattern, handler)
+}
+
 // RegisterPrometheus registers a new handler that listens on the given url and calls the given function
 // in order to provide metrics for a prometheus server. This function signature was used, because VictoriaMetrics
 // offers exactly this function signature.
