@@ -20,9 +20,6 @@ import (
 	"github.com/google/certificate-transparency-go/x509"
 )
 
-// tiledBatchSize is the maximum number of entries to process per polling tick.
-// Limiting batch size prevents a single log from monopolising the entry channel during catch-up.
-const tiledBatchSize = 500
 
 // tiledWorker processes a single tiled (Static CT API) log.
 type tiledWorker struct {
@@ -175,7 +172,7 @@ func (tw *tiledWorker) runWorker(ctx context.Context) error {
 				}
 
 				batchCount++
-				if batchCount >= tiledBatchSize {
+				if batchCount >= config.AppConfig.General.Scanner.TiledBatchSize {
 					// Yield; next tick will continue from tw.ctIndex.
 					break
 				}

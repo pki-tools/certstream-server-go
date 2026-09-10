@@ -38,6 +38,19 @@ type BufferSizes struct {
 	CertChan         int `yaml:"certchan"`
 }
 
+type ScannerOptions struct {
+	// BatchSize is the number of entries fetched per HTTP request for regular (RFC 6962) logs.
+	// CT log operators allow up to 1000; higher values mean fewer round-trips during catch-up.
+	BatchSize int `yaml:"batch_size"`
+	// ParallelFetch is the number of concurrent HTTP fetch requests per regular log.
+	// Values above 3 risk rate-limiting from log operators.
+	ParallelFetch int `yaml:"parallel_fetch"`
+	// NumWorkers is the number of parsing goroutines per regular log.
+	NumWorkers int `yaml:"num_workers"`
+	// TiledBatchSize is the maximum entries processed per 30-second tick for tiled logs.
+	TiledBatchSize int `yaml:"tiled_batch_size"`
+}
+
 type Config struct {
 	Webserver struct {
 		ServerConfig       `yaml:",inline"`
@@ -57,8 +70,9 @@ type Config struct {
 		DisableDefaultLogs bool `yaml:"disable_default_logs"`
 		// AdditionalLogs contains additional logs provided by the user that can be used in addition to the default logs.
 		AdditionalLogs []LogConfig `yaml:"additional_logs"`
-		BufferSizes    BufferSizes `yaml:"buffer_sizes"`
-		DropOldLogs    *bool       `yaml:"drop_old_logs"`
+		BufferSizes    BufferSizes    `yaml:"buffer_sizes"`
+		Scanner        ScannerOptions `yaml:"scanner"`
+		DropOldLogs    *bool          `yaml:"drop_old_logs"`
 		Recovery       struct {
 			Enabled     bool   `yaml:"enabled"`
 			StartAtHead bool   `yaml:"start_at_head"`
@@ -243,6 +257,22 @@ func validateConfig(config *Config) bool {
 
 	if config.General.BufferSizes.CertChan <= 0 {
 		config.General.BufferSizes.CertChan = 2000
+	}
+
+	if config.General.Scanner.BatchSize <= 0 {
+		config.General.Scanner.BatchSize = 256
+	}
+
+	if config.General.Scanner.ParallelFetch <= 0 {
+		config.General.Scanner.ParallelFetch = 1
+	}
+
+	if config.General.Scanner.NumWorkers <= 0 {
+		config.General.Scanner.NumWorkers = 1
+	}
+
+	if config.General.Scanner.TiledBatchSize <= 0 {
+		config.General.Scanner.TiledBatchSize = 500
 	}
 
 	// If the cleanup flag is not set, default to true

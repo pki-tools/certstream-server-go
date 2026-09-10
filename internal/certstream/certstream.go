@@ -42,6 +42,9 @@ func NewCertstreamServer(config config.Config) (*Certstream, error) {
 	// Register the CT log status dashboard
 	webserver.RegisterHTTPHandler("/log-status", logStatusHandler)
 
+	// Register the CCADB CA owners dashboard
+	webserver.RegisterHTTPHandler("/ccadb", ccadbHandler)
+
 	// Setup metrics server
 	cs.setupMetrics(webserver)
 
