@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -120,7 +121,9 @@ func IPWhitelist(whitelist []string) func(next http.Handler) http.Handler {
 func initFullWebsocket(w http.ResponseWriter, r *http.Request) {
 	connection, err := upgradeConnection(w, r)
 	if err != nil {
-		log.Println("Error while trying to upgrade connection:", err)
+		if isWebSocketRequest(r) {
+			log.Println("Error while trying to upgrade connection:", err)
+		}
 		return
 	}
 
@@ -132,7 +135,9 @@ func initFullWebsocket(w http.ResponseWriter, r *http.Request) {
 func initLiteWebsocket(w http.ResponseWriter, r *http.Request) {
 	connection, err := upgradeConnection(w, r)
 	if err != nil {
-		log.Println("Error while trying to upgrade connection:", err)
+		if isWebSocketRequest(r) {
+			log.Println("Error while trying to upgrade connection:", err)
+		}
 		return
 	}
 
@@ -144,15 +149,31 @@ func initLiteWebsocket(w http.ResponseWriter, r *http.Request) {
 func initDomainWebsocket(w http.ResponseWriter, r *http.Request) {
 	connection, err := upgradeConnection(w, r)
 	if err != nil {
-		log.Println("Error while trying to upgrade connection:", err)
+		if isWebSocketRequest(r) {
+			log.Println("Error while trying to upgrade connection:", err)
+		}
 		return
 	}
 
 	setupClient(connection, SubTypeDomain, r.RemoteAddr)
 }
 
+// isWebSocketRequest returns true if the request carries the headers required
+// to upgrade to a WebSocket connection (Connection: Upgrade + Upgrade: websocket).
+// Checking this before calling upgrader.Upgrade avoids a noisy error log for
+// plain HTTP probes (health checks, load-balancer pings, browser navigation).
+func isWebSocketRequest(r *http.Request) bool {
+	return strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade") &&
+		strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
+}
+
 // upgradeConnection upgrades the connection to a websocket and returns the connection.
 func upgradeConnection(w http.ResponseWriter, r *http.Request) (*websocket.Conn, error) {
+	if !isWebSocketRequest(r) {
+		http.Error(w, "This endpoint requires a WebSocket connection (Upgrade: websocket).", http.StatusUpgradeRequired)
+		return nil, fmt.Errorf("not a websocket request from %s", r.RemoteAddr)
+	}
+
 	var remoteAddr string
 
 	xForwardedFor := r.Header.Get("X-Forwarded-For")
