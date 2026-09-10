@@ -21,6 +21,7 @@ This project is a drop-in replacement for [Calidog's certstream-server](https://
 - [Tiled log support](#tiled-log-support)
 - [Certificate enrichment](#certificate-enrichment)
 - [Buffer tuning](#buffer-tuning)
+- [Scanner tuning](#scanner-tuning)
 - [Custom user agent](#custom-user-agent)
 - [CLI reference](#cli-reference)
 - [Network requirements](#network-requirements)
@@ -104,6 +105,12 @@ general:
     ctlog: 50               # internal scanner queue per regular log (entries)
     broadcastmanager: 3000  # central broadcast channel depth (entries)
     certchan: 1000          # internal worker→broadcaster pipeline depth (entries)
+
+  scanner:
+    batch_size: 256         # entries per HTTP request for regular logs (max 1000)
+    parallel_fetch: 1       # concurrent fetches per regular log (>3 risks rate-limiting)
+    num_workers: 1          # parsing goroutines per regular log
+    tiled_batch_size: 500   # max entries per 30s tick for tiled logs
 
   recovery:
     enabled: true
@@ -407,6 +414,41 @@ buffer_sizes:
 ```
 
 Reduce `websocket` further if you have many slow clients. Increase `certchan` / `broadcastmanager` if you see high `skipped_certs` metrics on the server itself (as opposed to on individual clients).
+
+---
+
+## Scanner tuning
+
+These settings control how aggressively the server fetches entries from CT logs. They are the primary levers for reducing catch-up time after the server has been offline or when a new log is added.
+
+| Config key | Default | What it controls |
+|---|---|---|
+| `scanner.batch_size` | `256` | Entries fetched per HTTP `get-entries` request for regular (RFC 6962) logs. The CT spec allows up to **1000**. A larger value means fewer round-trips during catch-up. |
+| `scanner.parallel_fetch` | `1` | Concurrent `get-entries` requests per regular log. Increasing to `2` roughly doubles catch-up throughput; values above `3` risk 429 rate-limiting from log operators. |
+| `scanner.num_workers` | `1` | Certificate parsing goroutines per regular log. Rarely the bottleneck — network is. |
+| `scanner.tiled_batch_size` | `500` | Maximum entries processed per 30-second polling tick for tiled (sunlight) logs. Caps catch-up speed to prevent memory spikes from a single tiled log flooding the pipeline. |
+
+**For faster catch-up** (if the server has been offline or is significantly behind):
+
+```yaml
+scanner:
+  batch_size: 1000
+  parallel_fetch: 2
+  num_workers: 1
+  tiled_batch_size: 2000
+```
+
+**Conservative defaults** (prioritise stability and memory over catch-up speed):
+
+```yaml
+scanner:
+  batch_size: 256
+  parallel_fetch: 1
+  num_workers: 1
+  tiled_batch_size: 500
+```
+
+Note: when running with many logs simultaneously, `parallel_fetch: 2` means up to ~100 concurrent outbound HTTP connections (50 logs × 2). Ensure the host OS and any upstream firewall allow this.
 
 ---
 

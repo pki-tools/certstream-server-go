@@ -539,14 +539,14 @@ func (w *worker) runWorker(ctx context.Context) error {
 
 	certScanner := scanner.NewScanner(jsonClient, scanner.ScannerOptions{
 		FetcherOptions: scanner.FetcherOptions{
-			BatchSize:     100,
-			ParallelFetch: 1,
+			BatchSize:     config.AppConfig.General.Scanner.BatchSize,
+			ParallelFetch: config.AppConfig.General.Scanner.ParallelFetch,
 			StartIndex:    int64(w.ctIndex),
 			Continuous:    true,
 		},
 		Matcher:     scanner.MatchAll{},
 		PrecertOnly: false,
-		NumWorkers:  1,
+		NumWorkers:  config.AppConfig.General.Scanner.NumWorkers,
 		BufferSize:  config.AppConfig.General.BufferSizes.CTLog,
 	})
 
