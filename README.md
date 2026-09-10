@@ -15,6 +15,7 @@ This project is a drop-in replacement for [Calidog's certstream-server](https://
 - [WebSocket endpoints](#websocket-endpoints)
 - [Message format](#message-format)
 - [Log status dashboard](#log-status-dashboard)
+- [CCADB CA owners dashboard](#ccadb-ca-owners-dashboard)
 - [Prometheus metrics](#prometheus-metrics)
 - [Recovery and resumption](#recovery-and-resumption)
 - [Tiled log support](#tiled-log-support)
@@ -268,6 +269,30 @@ All data is in-memory only and resets on server restart.
 
 ---
 
+## CCADB CA owners dashboard
+
+The server exposes a self-refreshing HTML dashboard at **`/ccadb`** (plain HTTP, same port as the WebSocket server) that lists every CA owner loaded from the CCADB public record.
+
+It shows one row per CA owner and updates automatically every 5 minutes:
+
+| Column | Description |
+|---|---|
+| CA Owner | Organisation name from the CCADB CA record |
+| # CAs | Number of distinct CA certificates belonging to this owner (by Subject Key Identifier) |
+| First Seen | UTC timestamp when entries for this owner were first loaded into memory |
+| First Seen (relative) | Human-readable age ("2 hours ago", "3 days ago") |
+
+A live-filter search box at the top narrows the table by owner name without a page reload.
+
+The page header shows:
+- **Last CCADB refresh** — timestamp and age of the most recent successful CCADB download (refreshed at startup then every 6 hours)
+- **Total CAs** — total number of CA key identifiers loaded
+- **CA Owners** — number of distinct owning organisations
+
+All data is in-memory only and resets on server restart.
+
+---
+
 ## Prometheus metrics
 
 Enable the metrics endpoint in config (`prometheus.enabled: true`). By default it is exposed at `/metrics` and restricted by IP whitelist.
@@ -420,7 +445,7 @@ The server makes outbound HTTPS connections to:
 
 ### Inbound
 
-- `webserver.listen_port` — WebSocket clients and the `/log-status` dashboard
+- `webserver.listen_port` — WebSocket clients, `/log-status` dashboard, and `/ccadb` dashboard
 - `prometheus.listen_port` — Prometheus scraping (can be the same port as above)
 
 ---

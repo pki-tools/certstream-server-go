@@ -169,6 +169,7 @@ func (w *Watcher) updateLogs() {
 		// Only update if we got valid data with at least some entries
 		oldCount := len(CAOwners)
 		CAOwners = caOwners
+		UpdateCAOwners(caOwners)
 		log.Printf("Successfully loaded %d CA owner mappings from CCADB (previous: %d)\n", len(CAOwners), oldCount)
 	}
 
