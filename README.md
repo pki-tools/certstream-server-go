@@ -16,6 +16,7 @@ This project is a drop-in replacement for [Calidog's certstream-server](https://
 - [Message format](#message-format)
 - [Log status dashboard](#log-status-dashboard)
 - [CCADB CA owners dashboard](#ccadb-ca-owners-dashboard)
+- [Error log dashboard](#error-log-dashboard)
 - [Prometheus metrics](#prometheus-metrics)
 - [Recovery and resumption](#recovery-and-resumption)
 - [Tiled log support](#tiled-log-support)
@@ -300,6 +301,37 @@ All data is in-memory only and resets on server restart.
 
 ---
 
+## Error log dashboard
+
+The server exposes a self-refreshing HTML dashboard at **`/errors`** (plain HTTP, same port as the WebSocket server) that shows a sliding window of the 500 most-recent errors across all monitored CT logs.
+
+It auto-refreshes every 30 seconds and includes a live-filter search box. When no errors have been recorded since startup, the page shows a "all logs appear healthy" message.
+
+| Column | Description |
+|---|---|
+| Time (UTC) | Exact timestamp of the error |
+| Age | How long ago the error occurred |
+| Log | Human-readable log name (hover for full URL) |
+| Category | Colour-coded error type badge (see below) |
+| Message | The underlying error string |
+
+**Error categories:**
+
+| Category | Colour | Meaning |
+|---|---|---|
+| `connection` | Red | Network errors, DNS failures, client creation failures |
+| `sth` | Amber | Failed to fetch Signed Tree Head from a regular log |
+| `checkpoint` | Amber | Failed to fetch checkpoint from a tiled log |
+| `parse` | Purple | Certificate or precertificate could not be parsed |
+| `scan` | Orange | Scanner-level error during continuous log scanning |
+| `tree-size` | Blue | Background tree-size poll failed (used by `/log-status`) |
+| `ccadb` | Green | CCADB data download or parse failure |
+| `other` | Grey | Unexpected errors not matching the above categories |
+
+The ring buffer holds the last 500 errors in memory and is reset on server restart.
+
+---
+
 ## Prometheus metrics
 
 Enable the metrics endpoint in config (`prometheus.enabled: true`). By default it is exposed at `/metrics` and restricted by IP whitelist.
@@ -487,7 +519,7 @@ The server makes outbound HTTPS connections to:
 
 ### Inbound
 
-- `webserver.listen_port` — WebSocket clients, `/log-status` dashboard, and `/ccadb` dashboard
+- `webserver.listen_port` — WebSocket clients, `/log-status`, `/ccadb`, and `/errors` dashboards
 - `prometheus.listen_port` — Prometheus scraping (can be the same port as above)
 
 ---

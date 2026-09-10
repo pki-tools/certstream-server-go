@@ -215,6 +215,7 @@ func pollAllTreeSizes(ctx context.Context) {
 				// Keep the previous tree size; log only at debug level to avoid noise.
 				if ctx.Err() == nil {
 					log.Printf("Tree size poll failed for '%s': %v\n", entry.normURL, err)
+					RecordError(entry.rawURL, entry.name, ErrCatTreeSize, err.Error())
 				}
 				return
 			}

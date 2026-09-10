@@ -163,8 +163,10 @@ func (w *Watcher) updateLogs() {
 	caOwners, err := DownloadAndParseCSV(ccadbURL, 18, 0, true)
 	if err != nil {
 		log.Printf("Failed to download CCADB data: %v (keeping existing CA owner data)\n", err)
+		RecordError("ccadb", "CCADB", ErrCatCCADB, err.Error())
 	} else if len(caOwners) == 0 {
 		log.Printf("CCADB data is empty or invalid (keeping existing CA owner data)\n")
+		RecordError("ccadb", "CCADB", ErrCatCCADB, "downloaded data was empty or invalid")
 	} else {
 		// Only update if we got valid data with at least some entries
 		oldCount := len(CAOwners)
@@ -476,16 +478,20 @@ func (w *worker) startDownloadingCerts(ctx context.Context) {
 			if errors.Is(workerErr, errFetchingSTHFailed) {
 				// TODO this could happen due to a 429 error. We should retry the request
 				log.Printf("Worker for '%s' failed - could not fetch STH\n", w.ctURL)
+				RecordError(w.ctURL, w.name, ErrCatSTH, "could not fetch STH")
 				return
 			} else if errors.Is(workerErr, errCreatingClient) {
 				log.Printf("Worker for '%s' failed - could not create client\n", w.ctURL)
+				RecordError(w.ctURL, w.name, ErrCatConnection, "could not create HTTP client")
 				return
 			} else if strings.Contains(workerErr.Error(), "no such host") {
 				log.Printf("Worker for '%s' failed to resolve host: %s\n", w.ctURL, workerErr)
+				RecordError(w.ctURL, w.name, ErrCatConnection, workerErr.Error())
 				return
 			}
 
 			log.Printf("Worker for '%s' failed with unexpected error: %s\n", w.ctURL, workerErr)
+			RecordError(w.ctURL, w.name, ErrCatOther, workerErr.Error())
 		}
 
 		// Check if the context was cancelled
@@ -553,6 +559,7 @@ func (w *worker) runWorker(ctx context.Context) error {
 	scanErr := certScanner.Scan(ctx, w.foundCertCallback, w.foundPrecertCallback)
 	if scanErr != nil {
 		log.Println("Scan error: ", scanErr)
+		RecordError(w.ctURL, w.name, ErrCatScan, scanErr.Error())
 		return scanErr
 	}
 
@@ -566,6 +573,7 @@ func (w *worker) foundCertCallback(rawEntry *ct.RawLogEntry) {
 	entry, parseErr := ParseCertstreamEntry(rawEntry, w.operatorName, w.name, w.ctURL)
 	if parseErr != nil {
 		log.Println("Error parsing certstream entry: ", parseErr)
+		RecordError(w.ctURL, w.name, ErrCatParse, parseErr.Error())
 		return
 	}
 
@@ -584,6 +592,7 @@ func (w *worker) foundPrecertCallback(rawEntry *ct.RawLogEntry) {
 	entry, parseErr := ParseCertstreamEntry(rawEntry, w.operatorName, w.name, w.ctURL)
 	if parseErr != nil {
 		log.Println("Error parsing certstream entry: ", parseErr)
+		RecordError(w.ctURL, w.name, ErrCatParse, parseErr.Error())
 		return
 	}
 

@@ -57,9 +57,11 @@ func (tw *tiledWorker) startDownloadingCerts(ctx context.Context) {
 		if workerErr != nil {
 			if strings.Contains(workerErr.Error(), "no such host") {
 				log.Printf("Tiled worker for '%s' failed to resolve host: %s\n", tw.monitoringURL, workerErr)
+				RecordError(tw.monitoringURL, tw.name, ErrCatConnection, workerErr.Error())
 				return
 			}
 			log.Printf("Tiled worker for '%s' failed with error: %s\n", tw.monitoringURL, workerErr)
+			RecordError(tw.monitoringURL, tw.name, ErrCatOther, workerErr.Error())
 		}
 
 		// Check if the context was cancelled
@@ -94,6 +96,7 @@ func (tw *tiledWorker) runWorker(ctx context.Context) error {
 	})
 	if err != nil {
 		log.Printf("Error creating sunlight client: %s\n", err)
+		RecordError(tw.monitoringURL, tw.name, ErrCatConnection, err.Error())
 		return fmt.Errorf("failed to create sunlight client: %w", err)
 	}
 
@@ -101,6 +104,7 @@ func (tw *tiledWorker) runWorker(ctx context.Context) error {
 	checkpoint, _, err := client.Checkpoint(ctx)
 	if err != nil {
 		log.Printf("Could not get checkpoint for '%s': %s\n", tw.monitoringURL, err)
+		RecordError(tw.monitoringURL, tw.name, ErrCatCheckpoint, err.Error())
 		return fmt.Errorf("failed to get checkpoint: %w", err)
 	}
 
@@ -132,6 +136,7 @@ func (tw *tiledWorker) runWorker(ctx context.Context) error {
 			checkpoint, _, err := client.Checkpoint(ctx)
 			if err != nil {
 				log.Printf("Could not get checkpoint for '%s': %s\n", tw.monitoringURL, err)
+				RecordError(tw.monitoringURL, tw.name, ErrCatCheckpoint, err.Error())
 				continue
 			}
 
@@ -152,6 +157,7 @@ func (tw *tiledWorker) runWorker(ctx context.Context) error {
 				certstreamEntry, parseErr := tw.parseTiledEntry(entry, index)
 				if parseErr != nil {
 					log.Printf("Error parsing tiled entry at index %d: %s\n", index, parseErr)
+					RecordError(tw.monitoringURL, tw.name, ErrCatParse, fmt.Sprintf("index %d: %s", index, parseErr))
 					continue
 				}
 
@@ -181,6 +187,7 @@ func (tw *tiledWorker) runWorker(ctx context.Context) error {
 			// Check if there was an error during iteration
 			if err := client.Err(); err != nil {
 				log.Printf("Error during tiled log iteration for '%s': %s\n", tw.monitoringURL, err)
+				RecordError(tw.monitoringURL, tw.name, ErrCatScan, err.Error())
 				return err
 			}
 		}
