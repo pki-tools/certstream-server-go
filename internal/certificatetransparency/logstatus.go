@@ -79,13 +79,19 @@ func registerLogForStatus(rawURL, name, operator string, lType LogType, publicKe
 		return
 	}
 
+	// Seed prevIndex with whatever the metrics already know so the very first
+	// tree-size poll (3 minutes after startup) can compute a rate rather than
+	// waiting for a second poll 3 minutes after that.
+	seedIndex := metrics.GetCTIndex(normURL)
 	logStatusReg.entries[normURL] = &logStatusEntry{
-		normURL:   normURL,
-		rawURL:    rawURL,
-		name:      name,
-		operator:  operator,
-		lType:     lType,
-		publicKey: publicKey,
+		normURL:     normURL,
+		rawURL:      rawURL,
+		name:        name,
+		operator:    operator,
+		lType:       lType,
+		publicKey:   publicKey,
+		prevIndex:   seedIndex,
+		prevIndexAt: time.Now(),
 	}
 }
 
@@ -199,6 +205,24 @@ func pollAllTreeSizes(ctx context.Context) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
+			currentIndex := indexes[entry.normURL]
+			now := time.Now()
+
+			// Always update the rate estimate from the index delta, regardless of
+			// whether the tree-size fetch below succeeds. This decouples rate/ETA
+			// from tree-size availability so logs still show processing stats even
+			// when the checkpoint/STH endpoint is unreachable.
+			entry.mu.Lock()
+			if !entry.prevIndexAt.IsZero() {
+				elapsed := now.Sub(entry.prevIndexAt).Seconds()
+				if elapsed > 0 && currentIndex >= entry.prevIndex {
+					entry.ratePerSec = float64(currentIndex-entry.prevIndex) / elapsed
+				}
+			}
+			entry.prevIndex = currentIndex
+			entry.prevIndexAt = now
+			entry.mu.Unlock()
+
 			pollCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 			defer cancel()
 
@@ -212,7 +236,7 @@ func pollAllTreeSizes(ctx context.Context) {
 			}
 
 			if err != nil {
-				// Keep the previous tree size; log only at debug level to avoid noise.
+				// Keep the previous tree size on failure.
 				if ctx.Err() == nil {
 					log.Printf("Tree size poll failed for '%s': %v\n", entry.normURL, err)
 					RecordError(entry.rawURL, entry.name, ErrCatTreeSize, err.Error())
@@ -220,23 +244,10 @@ func pollAllTreeSizes(ctx context.Context) {
 				return
 			}
 
-			currentIndex := indexes[entry.normURL]
-
 			entry.mu.Lock()
-			defer entry.mu.Unlock()
-
 			entry.treeSize = treeSize
 			entry.treeSizeAt = time.Now()
-
-			// Update rate estimate from index delta since the last poll.
-			if !entry.prevIndexAt.IsZero() {
-				elapsed := time.Since(entry.prevIndexAt).Seconds()
-				if elapsed > 0 && currentIndex >= entry.prevIndex {
-					entry.ratePerSec = float64(currentIndex-entry.prevIndex) / elapsed
-				}
-			}
-			entry.prevIndex = currentIndex
-			entry.prevIndexAt = time.Now()
+			entry.mu.Unlock()
 		}(e)
 	}
 
