@@ -178,7 +178,7 @@ func (tw *tiledWorker) runWorker(ctx context.Context) error {
 				}
 
 				batchCount++
-				if batchCount >= config.AppConfig.General.Scanner.TiledBatchSize {
+				if batchCount >= config.AppConfig.General.Scanner.TiledBatchSize && !IsCatchupActive(normalizeCtlogURL(tw.monitoringURL)) {
 					// Yield; next tick will continue from tw.ctIndex.
 					break
 				}

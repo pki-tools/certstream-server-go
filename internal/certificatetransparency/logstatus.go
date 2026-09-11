@@ -41,6 +41,7 @@ type LogStatusSnapshot struct {
 	RatePerSec   float64
 	ETA          time.Duration // 0 = live, -1 = unknown
 	TreeSizeAge  time.Duration // -1 = never fetched
+	CatchupUntil time.Time     // zero if catch-up not active
 }
 
 type logStatusEntry struct {
@@ -51,12 +52,14 @@ type logStatusEntry struct {
 	lType     LogType
 	publicKey crypto.PublicKey // nil for regular logs
 
-	mu          sync.Mutex
-	treeSize    uint64
-	treeSizeAt  time.Time
-	prevIndex   uint64
-	prevIndexAt time.Time
-	ratePerSec  float64
+	mu            sync.Mutex
+	treeSize      uint64
+	treeSizeAt    time.Time
+	prevIndex     uint64
+	prevIndexAt   time.Time
+	ratePerSec    float64
+	catchupUntil  time.Time
+	scanRestartCh chan struct{} // buffered(1); signal to restart scanner with catch-up settings
 }
 
 type logStatusRegistryT struct {
@@ -84,14 +87,15 @@ func registerLogForStatus(rawURL, name, operator string, lType LogType, publicKe
 	// waiting for a second poll 3 minutes after that.
 	seedIndex := metrics.GetCTIndex(normURL)
 	logStatusReg.entries[normURL] = &logStatusEntry{
-		normURL:     normURL,
-		rawURL:      rawURL,
-		name:        name,
-		operator:    operator,
-		lType:       lType,
-		publicKey:   publicKey,
-		prevIndex:   seedIndex,
-		prevIndexAt: time.Now(),
+		normURL:       normURL,
+		rawURL:        rawURL,
+		name:          name,
+		operator:      operator,
+		lType:         lType,
+		publicKey:     publicKey,
+		prevIndex:     seedIndex,
+		prevIndexAt:   time.Now(),
+		scanRestartCh: make(chan struct{}, 1),
 	}
 }
 
@@ -114,6 +118,7 @@ func GetLogStatuses() []LogStatusSnapshot {
 		treeSize := entry.treeSize
 		treeSizeAt := entry.treeSizeAt
 		rate := entry.ratePerSec
+		catchupUntil := entry.catchupUntil
 		entry.mu.Unlock()
 
 		var behind uint64
@@ -144,6 +149,7 @@ func GetLogStatuses() []LogStatusSnapshot {
 			RatePerSec:   rate,
 			ETA:          eta,
 			TreeSizeAge:  treeSizeAge,
+			CatchupUntil: catchupUntil,
 		})
 	}
 
@@ -302,4 +308,62 @@ func fetchTiledTreeSize(ctx context.Context, entry *logStatusEntry) (uint64, err
 	}
 
 	return uint64(checkpoint.N), nil
+}
+
+// TriggerCatchup activates catch-up mode for the given log for dur. It also sends a
+// non-blocking signal on the log's scanRestartCh so regular-log workers restart their
+// scanner immediately with higher batch/parallel settings rather than waiting for the
+// next natural restart.
+func TriggerCatchup(normURL string, dur time.Duration) {
+	logStatusReg.mu.RLock()
+	entry, ok := logStatusReg.entries[normURL]
+	logStatusReg.mu.RUnlock()
+	if !ok {
+		return
+	}
+	entry.mu.Lock()
+	entry.catchupUntil = time.Now().Add(dur)
+	entry.mu.Unlock()
+	// Non-blocking: if a signal is already pending, the new one is redundant.
+	select {
+	case entry.scanRestartCh <- struct{}{}:
+	default:
+	}
+}
+
+// IsCatchupActive returns true if catch-up mode is currently active for the given log.
+func IsCatchupActive(normURL string) bool {
+	logStatusReg.mu.RLock()
+	entry, ok := logStatusReg.entries[normURL]
+	logStatusReg.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	return !entry.catchupUntil.IsZero() && time.Now().Before(entry.catchupUntil)
+}
+
+// GetScanRestartCh returns the restart-signal channel for the given log. Workers should
+// select on it to detect when they should restart their scanner with catch-up settings.
+func GetScanRestartCh(normURL string) <-chan struct{} {
+	logStatusReg.mu.RLock()
+	defer logStatusReg.mu.RUnlock()
+	if entry, ok := logStatusReg.entries[normURL]; ok {
+		return entry.scanRestartCh
+	}
+	return nil
+}
+
+// NormalizeCtlogURL is the exported form of normalizeCtlogURL.
+func NormalizeCtlogURL(rawURL string) string {
+	return normalizeCtlogURL(rawURL)
+}
+
+// IsKnownLog reports whether the given normalised URL is registered in the status registry.
+func IsKnownLog(normURL string) bool {
+	logStatusReg.mu.RLock()
+	_, ok := logStatusReg.entries[normURL]
+	logStatusReg.mu.RUnlock()
+	return ok
 }

@@ -42,6 +42,9 @@ func NewCertstreamServer(config config.Config) (*Certstream, error) {
 	// Register the CT log status dashboard
 	webserver.RegisterHTTPHandler("/log-status", logStatusHandler)
 
+	// Register the catch-up trigger endpoint (POST only)
+	webserver.RegisterHTTPHandler("/log-status/catchup", catchupHandler)
+
 	// Register the CCADB CA owners dashboard
 	webserver.RegisterHTTPHandler("/ccadb", ccadbHandler)
 

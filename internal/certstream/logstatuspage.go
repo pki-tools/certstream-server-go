@@ -97,6 +97,24 @@ var logStatusTmpl = template.Must(template.New("logstatus").Funcs(template.FuncM
 		}
 		return "badge-regular"
 	},
+	"catchupRemaining": func(until time.Time) string {
+		if until.IsZero() {
+			return ""
+		}
+		d := time.Until(until).Round(time.Second)
+		if d <= 0 {
+			return ""
+		}
+		m := int(d.Minutes())
+		s := int(d.Seconds()) % 60
+		if m > 0 {
+			return fmt.Sprintf("%dm %ds", m, s)
+		}
+		return fmt.Sprintf("%ds", s)
+	},
+	"isCatchupActive": func(until time.Time) bool {
+		return !until.IsZero() && time.Now().Before(until)
+	},
 }).Parse(`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -121,6 +139,7 @@ tbody tr:hover td{background:#f8fafc}
 .badge{display:inline-block;padding:2px 9px;border-radius:99px;font-size:0.6875rem;font-weight:600;letter-spacing:.02em}
 .badge-regular{background:#dbeafe;color:#1d4ed8}
 .badge-tiled{background:#ede9fe;color:#6d28d9}
+.badge-catchup{background:#fef9c3;color:#854d0e}
 .eta-live{color:#15803d;font-weight:700}
 .eta-good{color:#16a34a}
 .eta-warn{color:#d97706}
@@ -130,6 +149,9 @@ tbody tr:hover td{background:#f8fafc}
 .status-slight{color:#d97706}
 .status-behind{color:#dc2626}
 .age{color:#9ca3af}
+button.catchup-btn{border:none;background:#3b82f6;color:#fff;font-size:0.6875rem;font-weight:600;padding:3px 10px;border-radius:6px;cursor:pointer;white-space:nowrap}
+button.catchup-btn:hover{background:#2563eb}
+button.catchup-btn:disabled{background:#93c5fd;cursor:default}
 </style>
 </head>
 <body>
@@ -152,6 +174,7 @@ tbody tr:hover td{background:#f8fafc}
   <th>Rate (e/s)</th>
   <th>Est. Catch-up</th>
   <th>Tree Size Age</th>
+  <th></th>
 </tr>
 </thead>
 <tbody>
@@ -159,18 +182,43 @@ tbody tr:hover td{background:#f8fafc}
 <tr>
   <td>{{.Operator}}</td>
   <td>{{.Name}}</td>
-  <td><span class="badge {{typeClass .Type}}">{{.Type}}</span></td>
+  <td>
+    <span class="badge {{typeClass .Type}}">{{.Type}}</span>
+    {{if isCatchupActive .CatchupUntil}}<span class="badge badge-catchup" title="Catch-up active for {{catchupRemaining .CatchupUntil}} more">&#9889; {{catchupRemaining .CatchupUntil}}</span>{{end}}
+  </td>
   <td class="num">{{formatNumber .CurrentIndex}}</td>
   <td class="num">{{if gt .TreeSize 0}}{{formatNumber .TreeSize}}{{else}}<span class="age">Pending</span>{{end}}</td>
   <td class="num {{behindClass .Behind}}">{{if gt .TreeSize 0}}{{if eq .Behind 0}}—{{else}}{{formatNumber .Behind}}{{end}}{{else}}<span class="age">—</span>{{end}}</td>
   <td class="num">{{if gt .RatePerSec 0.0}}{{formatRate .RatePerSec}}{{else}}<span class="age">—</span>{{end}}</td>
   <td class="{{etaClass .ETA}}">{{formatETA .ETA .Behind}}</td>
   <td class="age">{{formatAge .TreeSizeAge}}</td>
+  <td><button class="catchup-btn" onclick="triggerCatchup(this,'{{.URL}}')" {{if isCatchupActive .CatchupUntil}}disabled{{end}}>{{if isCatchupActive .CatchupUntil}}Catching up…{{else}}Catch Up{{end}}</button></td>
 </tr>
 {{end}}
 </tbody>
 </table>
 </div>
+<script>
+function triggerCatchup(btn, url) {
+  btn.disabled = true;
+  btn.textContent = 'Sending…';
+  fetch('/log-status/catchup', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: 'url=' + encodeURIComponent(url)
+  }).then(function(r) {
+    if (r.ok) {
+      btn.textContent = 'Catching up…';
+    } else {
+      btn.disabled = false;
+      btn.textContent = 'Catch Up';
+    }
+  }).catch(function() {
+    btn.disabled = false;
+    btn.textContent = 'Catch Up';
+  });
+}
+</script>
 </body>
 </html>`))
 
@@ -178,6 +226,35 @@ type logStatusPageData struct {
 	GeneratedAt string
 	TotalLogs   int
 	Logs        []certificatetransparency.LogStatusSnapshot
+}
+
+// catchupDuration is how long catch-up mode stays active after a trigger.
+const catchupDuration = 10 * time.Minute
+
+// catchupHandler accepts a POST with form field "url" and activates catch-up mode
+// for that log for catchupDuration. It responds 204 on success, 400 on bad input,
+// 404 if the log is not known.
+func catchupHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	rawURL := strings.TrimSpace(r.FormValue("url"))
+	if rawURL == "" {
+		http.Error(w, "url required", http.StatusBadRequest)
+		return
+	}
+	normURL := certificatetransparency.NormalizeCtlogURL(rawURL)
+	if !certificatetransparency.IsKnownLog(normURL) {
+		http.Error(w, "unknown log", http.StatusNotFound)
+		return
+	}
+	certificatetransparency.TriggerCatchup(normURL, catchupDuration)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func logStatusHandler(w http.ResponseWriter, _ *http.Request) {
