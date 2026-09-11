@@ -258,6 +258,8 @@ GET http://localhost:8080/domains-only/example.json
 
 The server exposes a self-refreshing HTML dashboard at **`/log-status`** (plain HTTP, same port as the WebSocket server).
 
+Every column header is sortable. Numeric columns open descending, so one click on **Behind** or **Tree Size** puts the most interesting rows on top; name columns open ascending. Sorting uses the underlying values rather than the formatted text, so `Pending` tree sizes sort as zero and `Est. Catch-up` orders as longest → shortest → `Live` → unknown. The choice is remembered in the browser, so the two-minute auto-refresh does not reset it.
+
 It shows one row per monitored CT log and updates automatically every 2 minutes:
 
 | Column | Description |

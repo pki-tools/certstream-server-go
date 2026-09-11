@@ -115,6 +115,23 @@ var logStatusTmpl = template.Must(template.New("logstatus").Funcs(template.FuncM
 	"isCatchupActive": func(until time.Time) bool {
 		return !until.IsZero() && time.Now().Before(until)
 	},
+	// Sort keys mirror the display logic above so the ordering matches what the
+	// cell actually shows: 0 is live, -1 is unknown, otherwise seconds.
+	"etaSort": func(eta time.Duration, behind uint64) int64 {
+		if eta == 0 {
+			return 0
+		}
+		if eta < 0 || behind == 0 {
+			return -1
+		}
+		return int64(eta.Seconds())
+	},
+	"ageSort": func(d time.Duration) int64 {
+		if d < 0 {
+			return -1
+		}
+		return int64(d.Seconds())
+	},
 }).Parse(`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -149,6 +166,14 @@ tbody tr:hover td{background:#f8fafc}
 .status-slight{color:#d97706}
 .status-behind{color:#dc2626}
 .age{color:#9ca3af}
+th.sortable{cursor:pointer;user-select:none;position:relative;padding-right:22px}
+th.sortable:hover{color:#fff;background:#273549}
+th.sortable i{position:absolute;right:7px;top:50%;transform:translateY(-50%);font-style:normal;font-size:0.65rem;opacity:.3}
+th.sortable i::after{content:"\2195"}
+th.sortable.sort-asc i{opacity:1}
+th.sortable.sort-asc i::after{content:"\25B2"}
+th.sortable.sort-desc i{opacity:1}
+th.sortable.sort-desc i::after{content:"\25BC"}
 button.catchup-btn{border:none;background:#3b82f6;color:#fff;font-size:0.6875rem;font-weight:600;padding:3px 10px;border-radius:6px;cursor:pointer;white-space:nowrap}
 button.catchup-btn:hover{background:#2563eb}
 button.catchup-btn:disabled{background:#93c5fd;cursor:default}
@@ -162,36 +187,36 @@ button.catchup-btn:disabled{background:#93c5fd;cursor:default}
   Tree sizes refresh every 3 min &nbsp;·&nbsp; Page auto-refreshes every 2 min
 </p>
 <div class="wrap">
-<table>
+<table id="logtable">
 <thead>
 <tr>
-  <th>Operator</th>
-  <th>Log Name</th>
-  <th>Type</th>
-  <th>Current Index</th>
-  <th>Tree Size</th>
-  <th>Behind</th>
-  <th>Rate (e/s)</th>
-  <th>Est. Catch-up</th>
-  <th>Tree Size Age</th>
+  <th class="sortable" data-col="0" data-type="text">Operator<i></i></th>
+  <th class="sortable" data-col="1" data-type="text">Log Name<i></i></th>
+  <th class="sortable" data-col="2" data-type="text">Type<i></i></th>
+  <th class="sortable" data-col="3" data-type="num">Current Index<i></i></th>
+  <th class="sortable" data-col="4" data-type="num">Tree Size<i></i></th>
+  <th class="sortable" data-col="5" data-type="num">Behind<i></i></th>
+  <th class="sortable" data-col="6" data-type="num">Rate (e/s)<i></i></th>
+  <th class="sortable" data-col="7" data-type="num">Est. Catch-up<i></i></th>
+  <th class="sortable" data-col="8" data-type="num">Tree Size Age<i></i></th>
   <th></th>
 </tr>
 </thead>
 <tbody>
 {{range .Logs}}
 <tr>
-  <td>{{.Operator}}</td>
-  <td>{{.Name}}</td>
-  <td>
+  <td data-sort="{{.Operator}}">{{.Operator}}</td>
+  <td data-sort="{{.Name}}">{{.Name}}</td>
+  <td data-sort="{{.Type}}">
     <span class="badge {{typeClass .Type}}">{{.Type}}</span>
     {{if isCatchupActive .CatchupUntil}}<span class="badge badge-catchup" title="Catch-up active for {{catchupRemaining .CatchupUntil}} more">&#9889; {{catchupRemaining .CatchupUntil}}</span>{{end}}
   </td>
-  <td class="num">{{formatNumber .CurrentIndex}}</td>
-  <td class="num">{{if gt .TreeSize 0}}{{formatNumber .TreeSize}}{{else}}<span class="age">Pending</span>{{end}}</td>
-  <td class="num {{behindClass .Behind}}">{{if gt .TreeSize 0}}{{if eq .Behind 0}}—{{else}}{{formatNumber .Behind}}{{end}}{{else}}<span class="age">—</span>{{end}}</td>
-  <td class="num">{{if gt .RatePerSec 0.0}}{{formatRate .RatePerSec}}{{else}}<span class="age">—</span>{{end}}</td>
-  <td class="{{etaClass .ETA}}">{{formatETA .ETA .Behind}}</td>
-  <td class="age">{{formatAge .TreeSizeAge}}</td>
+  <td class="num" data-sort="{{.CurrentIndex}}">{{formatNumber .CurrentIndex}}</td>
+  <td class="num" data-sort="{{.TreeSize}}">{{if gt .TreeSize 0}}{{formatNumber .TreeSize}}{{else}}<span class="age">Pending</span>{{end}}</td>
+  <td class="num {{behindClass .Behind}}" data-sort="{{.Behind}}">{{if gt .TreeSize 0}}{{if eq .Behind 0}}—{{else}}{{formatNumber .Behind}}{{end}}{{else}}<span class="age">—</span>{{end}}</td>
+  <td class="num" data-sort="{{.RatePerSec}}">{{if gt .RatePerSec 0.0}}{{formatRate .RatePerSec}}{{else}}<span class="age">—</span>{{end}}</td>
+  <td class="{{etaClass .ETA}}" data-sort="{{etaSort .ETA .Behind}}">{{formatETA .ETA .Behind}}</td>
+  <td class="age" data-sort="{{ageSort .TreeSizeAge}}">{{formatAge .TreeSizeAge}}</td>
   <td><button class="catchup-btn" onclick="triggerCatchup(this,'{{.URL}}')" {{if isCatchupActive .CatchupUntil}}disabled{{end}}>{{if isCatchupActive .CatchupUntil}}Catching up…{{else}}Catch Up{{end}}</button></td>
 </tr>
 {{end}}
@@ -199,6 +224,77 @@ button.catchup-btn:disabled{background:#93c5fd;cursor:default}
 </table>
 </div>
 <script>
+var SORT_KEY = 'ctLogStatusSort';
+
+function cellValue(row, col) {
+  var cell = row.cells[col];
+  var raw = cell ? cell.getAttribute('data-sort') : null;
+  if (raw === null) return '';
+  var n = parseFloat(raw);
+  return isNaN(n) ? raw.toLowerCase() : n;
+}
+
+function sortBy(col, dir) {
+  var table = document.getElementById('logtable');
+  var tbody = table.tBodies[0];
+  var rows = Array.prototype.slice.call(tbody.rows);
+
+  rows.sort(function (a, b) {
+    var av = cellValue(a, col), bv = cellValue(b, col);
+    if (av < bv) return -dir;
+    if (av > bv) return dir;
+    return 0;
+  });
+
+  // Re-appending an existing node moves it, so this reorders in place.
+  rows.forEach(function (r) { tbody.appendChild(r); });
+
+  table.querySelectorAll('th.sortable').forEach(function (th) {
+    th.classList.remove('sort-asc', 'sort-desc');
+    th.removeAttribute('aria-sort');
+  });
+
+  var active = table.querySelector('th[data-col="' + col + '"]');
+  if (active) {
+    active.classList.add(dir === 1 ? 'sort-asc' : 'sort-desc');
+    active.setAttribute('aria-sort', dir === 1 ? 'ascending' : 'descending');
+  }
+
+  // The page reloads itself every two minutes; without this the sort would be
+  // lost each time. Storage can be unavailable, so never let it break sorting.
+  try { localStorage.setItem(SORT_KEY, col + ':' + dir); } catch (e) {}
+}
+
+document.querySelectorAll('#logtable th.sortable').forEach(function (th) {
+  th.addEventListener('click', function () {
+    var col = parseInt(th.dataset.col, 10);
+    var dir;
+    if (th.classList.contains('sort-asc')) {
+      dir = -1;
+    } else if (th.classList.contains('sort-desc')) {
+      dir = 1;
+    } else {
+      // Numbers open descending — the interesting rows (most behind, largest)
+      // are at the top. Names open ascending.
+      dir = th.dataset.type === 'num' ? -1 : 1;
+    }
+    sortBy(col, dir);
+  });
+});
+
+(function restoreSort() {
+  var saved;
+  try { saved = localStorage.getItem(SORT_KEY); } catch (e) { return; }
+  if (!saved) return;
+
+  var parts = saved.split(':');
+  var col = parseInt(parts[0], 10), dir = parseInt(parts[1], 10);
+  if (isNaN(col) || (dir !== 1 && dir !== -1)) return;
+  if (!document.querySelector('#logtable th[data-col="' + col + '"]')) return;
+
+  sortBy(col, dir);
+})();
+
 function triggerCatchup(btn, url) {
   btn.disabled = true;
   btn.textContent = 'Sending…';
