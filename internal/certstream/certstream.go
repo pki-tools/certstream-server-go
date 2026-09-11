@@ -5,22 +5,27 @@ package certstream
 // It also handles signals for graceful shutdown of the server.
 
 import (
+	"context"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/d-Rickyy-b/certstream-server-go/internal/certificatetransparency"
 	"github.com/d-Rickyy-b/certstream-server-go/internal/config"
+	"github.com/d-Rickyy-b/certstream-server-go/internal/dashboard"
 	"github.com/d-Rickyy-b/certstream-server-go/internal/metrics"
 	"github.com/d-Rickyy-b/certstream-server-go/internal/web"
 )
 
 type Certstream struct {
-	webserver     *web.WebServer
-	metricsServer *web.WebServer
-	watcher       *certificatetransparency.Watcher
-	config        config.Config
+	webserver      *web.WebServer
+	metricsServer  *web.WebServer
+	watcher        *certificatetransparency.Watcher
+	dashboardStore *dashboard.Store
+	dashboardStop  context.CancelFunc
+	config         config.Config
 }
 
 func NewRawCertstream(config config.Config) *Certstream {
@@ -51,6 +56,9 @@ func NewCertstreamServer(config config.Config) (*Certstream, error) {
 	// Register the error log dashboard
 	webserver.RegisterHTTPHandler("/errors", errorsHandler)
 
+	// Register the historical dashboard if enabled
+	cs.setupDashboard(webserver)
+
 	// Setup metrics server
 	cs.setupMetrics(webserver)
 
@@ -65,6 +73,29 @@ func NewCertstreamFromConfigFile(configPath string) (*Certstream, error) {
 	}
 
 	return NewCertstreamServer(conf)
+}
+
+// setupDashboard opens the dashboard database and registers its routes. A failure
+// to open the database disables the dashboard rather than stopping the server —
+// certificate streaming does not depend on it.
+func (cs *Certstream) setupDashboard(webserver *web.WebServer) {
+	if !cs.config.General.Dashboard.Enabled {
+		return
+	}
+
+	store, err := dashboard.Open(cs.config.General.Dashboard.DBPath)
+	if err != nil {
+		log.Printf("Could not open dashboard database, dashboard disabled: %v\n", err)
+		return
+	}
+
+	cs.dashboardStore = store
+	dashboardStore = store
+
+	webserver.RegisterHTTPHandler("/dashboard", dashboardHandler)
+	webserver.RegisterHTTPHandler("/dashboard/data", dashboardDataHandler)
+
+	log.Printf("Dashboard enabled at /dashboard (db: %s)\n", cs.config.General.Dashboard.DBPath)
 }
 
 // setupMetrics configures the webserver to handle prometheus metrics according to the config.
@@ -109,6 +140,16 @@ func (cs *Certstream) Start() {
 		go cs.metricsServer.Start()
 	}
 
+	// Start sampling into the dashboard database
+	if cs.dashboardStore != nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		cs.dashboardStop = cancel
+
+		dashboard.StartSampler(ctx, cs.dashboardStore,
+			time.Duration(cs.config.General.Dashboard.SampleInterval)*time.Second,
+			time.Duration(cs.config.General.Dashboard.RetentionDays)*24*time.Hour)
+	}
+
 	// Start the watcher - this is a blocking function
 	cs.watcher.Start()
 }
@@ -125,6 +166,16 @@ func (cs *Certstream) Stop() {
 
 	if cs.metricsServer != nil {
 		cs.metricsServer.Stop()
+	}
+
+	if cs.dashboardStop != nil {
+		cs.dashboardStop()
+	}
+
+	if cs.dashboardStore != nil {
+		if err := cs.dashboardStore.Close(); err != nil {
+			log.Println("Error closing dashboard database:", err)
+		}
 	}
 }
 

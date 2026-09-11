@@ -17,6 +17,7 @@ This project is a drop-in replacement for [Calidog's certstream-server](https://
 - [Log status dashboard](#log-status-dashboard)
 - [CCADB CA owners dashboard](#ccadb-ca-owners-dashboard)
 - [Error log dashboard](#error-log-dashboard)
+- [Historical dashboard](#historical-dashboard)
 - [Prometheus metrics](#prometheus-metrics)
 - [Recovery and resumption](#recovery-and-resumption)
 - [Tiled log support](#tiled-log-support)
@@ -332,6 +333,54 @@ The ring buffer holds the last 500 errors in memory and is reset on server resta
 
 ---
 
+## Historical dashboard
+
+`/log-status`, `/ccadb` and `/errors` all show the *current* moment. The historical dashboard at **`/dashboard`** adds the time dimension: it periodically snapshots log state into a local SQLite database and charts it over selectable windows, covering the cases that would otherwise require a full Prometheus + Grafana deployment.
+
+It is **disabled by default**. Enable it in config:
+
+```yaml
+general:
+  dashboard:
+    enabled: true
+    db_path: "./dashboard.db"
+    sample_interval: 60
+    retention_days: 7
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `enabled` | `false` | Turns the endpoint and background sampler on |
+| `db_path` | `./dashboard.db` | SQLite file used to persist samples |
+| `sample_interval` | `60` | Seconds between snapshots |
+| `retention_days` | `7` | How long samples are kept before hourly pruning |
+
+**Time ranges:** 1 hour, 12 hours, 24 hours, 3 days, 7 days. Switching range re-queries the server without reloading the page. Each range is downsampled to roughly 120 points, so a 7-day chart is as responsive as a 1-hour one.
+
+**Charts and figures:**
+
+| Panel | Description |
+|---|---|
+| Ingestion rate | Certificates + precertificates per second, derived from the cumulative counters |
+| Total backlog | Entries behind, summed across all logs |
+| Backlog by log | Backlog history for the five logs currently furthest behind |
+| Log health | Logs caught up vs. logs behind, over time |
+| Connected clients | WebSocket subscribers stacked by stream type (full / lite / domains-only) |
+| Fastest logs | Current entries per second, ranked |
+| Logs furthest behind | Table of current state with behind count, rate and estimated catch-up |
+
+Headline tiles show current/peak/average rate, certificates seen in the window, total backlog, live-vs-total log counts, connected clients and lifetime processed count.
+
+**Notes:**
+
+- The database is opened once at startup. If it cannot be opened the dashboard is disabled and the server continues streaming normally — certificate delivery never depends on it.
+- Data persists across restarts. Rate is derived from counter deltas and correctly ignores the reset that a restart causes, so restarts leave a gap rather than a false spike.
+- WAL mode is used, so `dashboard.db-wal` and `dashboard.db-shm` appear alongside the database file. Ensure the process has write permission on the directory, not just the file.
+- Sizing: roughly 100 logs at a 60-second interval over 7 days is about 50–80 MB. Raise `sample_interval` or lower `retention_days` to shrink it.
+- SQLite is accessed through a pure-Go driver, so `CGO_ENABLED=0` static builds and the Alpine Docker image continue to work unchanged.
+
+---
+
 ## Prometheus metrics
 
 Enable the metrics endpoint in config (`prometheus.enabled: true`). By default it is exposed at `/metrics` and restricted by IP whitelist.
@@ -519,7 +568,7 @@ The server makes outbound HTTPS connections to:
 
 ### Inbound
 
-- `webserver.listen_port` — WebSocket clients, `/log-status`, `/ccadb`, and `/errors` dashboards
+- `webserver.listen_port` — WebSocket clients and the `/log-status`, `/ccadb`, `/errors` and `/dashboard` pages
 - `prometheus.listen_port` — Prometheus scraping (can be the same port as above)
 
 ---

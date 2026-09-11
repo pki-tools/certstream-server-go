@@ -51,6 +51,17 @@ type ScannerOptions struct {
 	TiledBatchSize int `yaml:"tiled_batch_size"`
 }
 
+type DashboardOptions struct {
+	// Enabled turns the /dashboard endpoint and its background sampler on.
+	Enabled bool `yaml:"enabled"`
+	// DBPath is the SQLite file used to persist samples across restarts.
+	DBPath string `yaml:"db_path"`
+	// SampleInterval is how often (in seconds) log state is snapshotted.
+	SampleInterval int `yaml:"sample_interval"`
+	// RetentionDays is how long samples are kept before being pruned.
+	RetentionDays int `yaml:"retention_days"`
+}
+
 type Config struct {
 	Webserver struct {
 		ServerConfig       `yaml:",inline"`
@@ -69,10 +80,11 @@ type Config struct {
 		// DisableDefaultLogs indicates whether the default logs used in Google Chrome and provided by Google should be disabled.
 		DisableDefaultLogs bool `yaml:"disable_default_logs"`
 		// AdditionalLogs contains additional logs provided by the user that can be used in addition to the default logs.
-		AdditionalLogs []LogConfig `yaml:"additional_logs"`
-		BufferSizes    BufferSizes    `yaml:"buffer_sizes"`
-		Scanner        ScannerOptions `yaml:"scanner"`
-		DropOldLogs    *bool          `yaml:"drop_old_logs"`
+		AdditionalLogs []LogConfig      `yaml:"additional_logs"`
+		BufferSizes    BufferSizes      `yaml:"buffer_sizes"`
+		Scanner        ScannerOptions   `yaml:"scanner"`
+		Dashboard      DashboardOptions `yaml:"dashboard"`
+		DropOldLogs    *bool            `yaml:"drop_old_logs"`
 		Recovery       struct {
 			Enabled     bool   `yaml:"enabled"`
 			StartAtHead bool   `yaml:"start_at_head"`
@@ -273,6 +285,21 @@ func validateConfig(config *Config) bool {
 
 	if config.General.Scanner.TiledBatchSize <= 0 {
 		config.General.Scanner.TiledBatchSize = 500
+	}
+
+	if config.General.Dashboard.Enabled {
+		if config.General.Dashboard.DBPath == "" {
+			log.Println("Dashboard enabled but no db_path specified. Defaulting to ./dashboard.db")
+			config.General.Dashboard.DBPath = "./dashboard.db"
+		}
+
+		if config.General.Dashboard.SampleInterval <= 0 {
+			config.General.Dashboard.SampleInterval = 60
+		}
+
+		if config.General.Dashboard.RetentionDays <= 0 {
+			config.General.Dashboard.RetentionDays = 7
+		}
 	}
 
 	// If the cleanup flag is not set, default to true

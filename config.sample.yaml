@@ -46,6 +46,22 @@ general:
   # This option defaults to true. See https://github.com/d-Rickyy-b/certstream-server-go/issues/51
   drop_old_logs: true
 
+  # Optional historical dashboard at /dashboard. Periodically snapshots log state
+  # into a local SQLite file and renders charts over 1h/12h/24h/3d/7d windows,
+  # covering the common cases that would otherwise need Prometheus + Grafana.
+  dashboard:
+    # Disabled by default. When off, no database is opened and no samples are taken.
+    enabled: false
+    # SQLite file used to persist samples. Needs write permission on the directory
+    # (WAL mode also creates "-wal" and "-shm" files alongside it).
+    db_path: "./dashboard.db"
+    # How often (seconds) to snapshot log state. Lower means finer charts and a
+    # larger database; 60 is a good balance.
+    sample_interval: 60
+    # How long to keep samples. Older rows are pruned hourly.
+    # With ~100 logs at a 60s interval, 7 days is roughly 50-80 MB.
+    retention_days: 7
+
   # Options for resuming certificate downloads after restart
   recovery:
     # If enabled, the server will resume downloading certificates from the last processed and stored index for each log.

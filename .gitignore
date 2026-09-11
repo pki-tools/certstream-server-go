@@ -33,3 +33,8 @@ dist/
 config.yaml
 config.yml
 ct_index.json
+
+# Dashboard SQLite database (plus its WAL/shared-memory sidecars)
+dashboard.db
+dashboard.db-wal
+dashboard.db-shm
