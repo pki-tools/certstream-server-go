@@ -1,6 +1,97 @@
 package certificatetransparency
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
+
+// TestStartPositionIsRecordedImmediately is the regression test for logs being
+// persisted at index 0 despite start_at_head placing them at the tree head.
+//
+// metrics.Inc is the only other writer of the recorded index and it does not run
+// until a certificate completes the pipeline. Before the fix, everything that
+// reads the index — ct_index.json, /log-status, the dashboard — saw 0 until then,
+// so a correctly-started log reported its entire tree as backlog, and a restart
+// in that window could trigger a real full backfill.
+func TestStartPositionIsRecordedImmediately(t *testing.T) {
+	const (
+		url      = "ct.example.com/regular-startathead"
+		treeSize = uint64(500_000_000)
+	)
+
+	metrics.Init("Example", url)
+	registerLogForStatus(url, "Example Log", "Example", LogTypeRegular, nil)
+
+	if got := metrics.GetCTIndex(url); got != 0 {
+		t.Fatalf("precondition: index = %d, want 0", got)
+	}
+
+	// What a worker does when it starts at the tree head.
+	recordStartPosition(url, treeSize)
+
+	if got := metrics.GetCTIndex(url); got != treeSize {
+		t.Errorf("recorded index = %d, want %d — this is what lands in ct_index.json", got, treeSize)
+	}
+
+	// /log-status must show the log as caught up, not the whole tree as backlog.
+	logStatusReg.mu.RLock()
+	entry := logStatusReg.entries[url]
+	logStatusReg.mu.RUnlock()
+
+	if entry == nil {
+		t.Fatal("log not registered for status")
+	}
+
+	entry.mu.Lock()
+	entry.treeSize = treeSize
+	entry.treeSizeAt = time.Now()
+	entry.mu.Unlock()
+
+	var snap *LogStatusSnapshot
+	for _, s := range GetLogStatuses() {
+		if s.URL == url {
+			snap = &s
+			break
+		}
+	}
+	if snap == nil {
+		t.Fatal("log missing from status snapshot")
+	}
+
+	if snap.Behind != 0 {
+		t.Errorf("Behind = %d, want 0 (a start-at-head log is live, not backlogged)", snap.Behind)
+	}
+}
+
+// TestStartPositionDoesNotFakeARateSpike guards the other half of the fix: moving
+// the index from 0 to the tree size is a reposition, not throughput, and must not
+// be counted as hundreds of millions of entries per second on the next poll.
+func TestStartPositionDoesNotFakeARateSpike(t *testing.T) {
+	const (
+		url      = "ct.example.com/rate-baseline"
+		treeSize = uint64(500_000_000)
+	)
+
+	metrics.Init("Example", url)
+	registerLogForStatus(url, "Example Log 2", "Example", LogTypeRegular, nil)
+
+	recordStartPosition(url, treeSize)
+
+	logStatusReg.mu.RLock()
+	entry := logStatusReg.entries[url]
+	logStatusReg.mu.RUnlock()
+
+	entry.mu.Lock()
+	prevIndex, rate := entry.prevIndex, entry.ratePerSec
+	entry.mu.Unlock()
+
+	if prevIndex != treeSize {
+		t.Errorf("rate baseline prevIndex = %d, want %d; the next poll would bill the jump as throughput", prevIndex, treeSize)
+	}
+	if rate != 0 {
+		t.Errorf("ratePerSec = %v, want 0", rate)
+	}
+}
 
 // TestTiledThroughputCeiling records the ceiling the drain fix removed: the old
 // loop waited for the poll ticker between batches, so a tiled log could never

@@ -552,6 +552,13 @@ func (w *worker) runWorker(ctx context.Context) error {
 		if startAtHead && recoveryEnabled {
 			log.Printf("No saved index for '%s', starting from current STH: %d\n", w.ctURL, w.ctIndex)
 		}
+
+		// Publish the starting position immediately. metrics.Inc only runs once a
+		// certificate has travelled the whole pipeline, so without this the log
+		// stays recorded at index 0 — which persists to ct_index.json (making a
+		// later start_at_head:false run backfill the entire log) and makes
+		// /log-status report the whole tree as backlog.
+		recordStartPosition(normalizeCtlogURL(w.ctURL), w.ctIndex)
 	} else if w.ctIndex == 0 {
 		// Recovery is on but this log has no saved position, so the scanner
 		// backfills the log's entire history from index 0. On /log-status that

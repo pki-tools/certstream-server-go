@@ -99,6 +99,26 @@ func registerLogForStatus(rawURL, name, operator string, lType LogType, publicKe
 	}
 }
 
+// resetRateBaseline re-seeds a log's rate calculation after its index jumps for a
+// reason other than progress — a start-at-head reposition moves the index from 0
+// to the tree size, which would otherwise be counted as millions of entries per
+// second on the next poll.
+func resetRateBaseline(normURL string, index uint64) {
+	logStatusReg.mu.RLock()
+	entry, ok := logStatusReg.entries[normURL]
+	logStatusReg.mu.RUnlock()
+
+	if !ok {
+		return
+	}
+
+	entry.mu.Lock()
+	entry.prevIndex = index
+	entry.prevIndexAt = time.Now()
+	entry.ratePerSec = 0
+	entry.mu.Unlock()
+}
+
 // GetLogStatuses returns a sorted snapshot of all registered logs' current statuses.
 func GetLogStatuses() []LogStatusSnapshot {
 	indexes := metrics.GetAllCTIndexes()

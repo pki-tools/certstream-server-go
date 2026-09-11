@@ -153,6 +153,16 @@ var (
 	certChanCap   atomic.Int64
 )
 
+// recordStartPosition publishes a worker's starting index so the rest of the
+// system sees it before the first certificate is processed. metrics.Inc is
+// otherwise the only writer, and it does not run until an entry completes the
+// pipeline, leaving the log recorded at index 0 until then.
+func recordStartPosition(normURL string, index uint64) {
+	metrics.SetCTIndex(normURL, index)
+	// The index jump is a reposition, not throughput; don't let it register as one.
+	resetRateBaseline(normURL, index)
+}
+
 // GetPipelineDepth returns the current and maximum depth of the entry channel.
 func GetPipelineDepth() (depth, capacity int64) {
 	return certChanDepth.Load(), certChanCap.Load()
