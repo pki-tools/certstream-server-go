@@ -9,14 +9,15 @@ import (
 type ErrorCategory string
 
 const (
-	ErrCatConnection  ErrorCategory = "connection"
-	ErrCatSTH         ErrorCategory = "sth"
-	ErrCatCheckpoint  ErrorCategory = "checkpoint"
-	ErrCatParse       ErrorCategory = "parse"
-	ErrCatScan        ErrorCategory = "scan"
-	ErrCatTreeSize    ErrorCategory = "tree-size"
-	ErrCatCCADB       ErrorCategory = "ccadb"
-	ErrCatOther       ErrorCategory = "other"
+	ErrCatConnection ErrorCategory = "connection"
+	ErrCatSTH        ErrorCategory = "sth"
+	ErrCatCheckpoint ErrorCategory = "checkpoint"
+	ErrCatParse      ErrorCategory = "parse"
+	ErrCatScan       ErrorCategory = "scan"
+	ErrCatTreeSize   ErrorCategory = "tree-size"
+	ErrCatCCADB      ErrorCategory = "ccadb"
+	ErrCatRateLimit  ErrorCategory = "rate-limit"
+	ErrCatOther      ErrorCategory = "other"
 )
 
 const errorRingSize = 500

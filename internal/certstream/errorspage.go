@@ -34,6 +34,16 @@ var errorsTmpl = template.Must(template.New("errors").Funcs(template.FuncMap{
 			return fmt.Sprintf("%dh %dm ago", h, m)
 		}
 	},
+	"sharePct": func(v, max int64) int {
+		if max <= 0 {
+			return 0
+		}
+		pct := int(v * 100 / max)
+		if pct < 3 {
+			return 3 // keep a sliver visible for very small counts
+		}
+		return pct
+	},
 	"catClass": func(cat certificatetransparency.ErrorCategory) string {
 		switch cat {
 		case certificatetransparency.ErrCatConnection:
@@ -50,6 +60,8 @@ var errorsTmpl = template.Must(template.New("errors").Funcs(template.FuncMap{
 			return "cat-treesize"
 		case certificatetransparency.ErrCatCCADB:
 			return "cat-ccadb"
+		case certificatetransparency.ErrCatRateLimit:
+			return "cat-ratelimit"
 		default:
 			return "cat-other"
 		}
@@ -93,7 +105,20 @@ tbody tr:hover td{background:#f8fafc}
 .cat-scan       {background:#ffedd5;color:#9a3412}
 .cat-treesize   {background:#e0f2fe;color:#075985}
 .cat-ccadb      {background:#dcfce7;color:#166534}
+.cat-ratelimit  {background:#fee2e2;color:#b91c1c;box-shadow:inset 0 0 0 1px #fca5a5}
 .cat-other      {background:#f1f5f9;color:#475569}
+
+.diag{background:#fff;border-radius:10px;padding:15px 18px;margin-bottom:18px;box-shadow:0 1px 4px rgba(0,0,0,.12),0 0 0 1px rgba(0,0,0,.05)}
+.diag h2{font-size:0.9375rem;font-weight:700;margin-bottom:2px}
+.diag .hint{font-size:0.75rem;color:#6b7280;margin-bottom:12px}
+.diag table{margin-top:2px}
+.verdict{border-radius:8px;padding:10px 13px;font-size:0.8125rem;line-height:1.5;margin-bottom:12px}
+.verdict b{font-weight:700}
+.v-rl{background:#fef2f2;color:#7f1d1d;box-shadow:inset 0 0 0 1px #fecaca}
+.v-sat{background:#fff7ed;color:#7c2d12;box-shadow:inset 0 0 0 1px #fed7aa}
+.v-ok{background:#f0fdf4;color:#14532d;box-shadow:inset 0 0 0 1px #bbf7d0}
+.bar{position:relative;height:7px;border-radius:99px;background:#f1f5f9;overflow:hidden;min-width:90px}
+.bar i{position:absolute;left:0;top:0;bottom:0;border-radius:99px;background:#dc2626}
 </style>
 </head>
 <body>
@@ -103,6 +128,47 @@ tbody tr:hover td{background:#f8fafc}
   Sliding window: last <strong>{{.WindowSize}}</strong> errors &nbsp;·&nbsp;
   Page auto-refreshes every 30 s
 </p>
+<div class="diag">
+  <h2>Throughput diagnosis</h2>
+  <p class="hint">Why a log falls behind: it is being throttled by the operator, or this server cannot drain what it already fetches.</p>
+
+  {{if .RateLimits}}
+  <div class="verdict v-rl">
+    <b>Rate limiting detected.</b> {{.TotalRateLimitHits}} throttled response{{if ne .TotalRateLimitHits 1}}s{{end}} across {{len .RateLimits}} log{{if ne (len .RateLimits) 1}}s{{end}}.
+    The CT client retries these automatically with backoff, so they never surface as scan failures — the log just silently falls behind.
+    <b>Raising <code>parallel_fetch</code> or using Catch Up on these logs makes it worse</b>, since more concurrent requests earn more throttling. Lower <code>parallel_fetch</code> for them instead.
+  </div>
+  {{else if .PipelineSaturated}}
+  <div class="verdict v-sat">
+    <b>No rate limiting seen, but the pipeline is backed up</b> ({{.PipelineDepth}} of {{.PipelineCap}} entries queued).
+    Fetching is outpacing processing, so the bottleneck is downstream — CPU, JSON encoding, or slow WebSocket clients. More fetch connections will not help; raise <code>buffer_sizes.certchan</code> and check CPU headroom.
+  </div>
+  {{else}}
+  <div class="verdict v-ok">
+    <b>No rate limiting seen{{if gt .PipelineCap 0}} and the pipeline is keeping up</b> ({{.PipelineDepth}} of {{.PipelineCap}} entries queued){{else}}</b>{{end}}.
+    If logs are still behind, the fetch rate is simply too low — raise <code>scanner.batch_size</code> toward 1000 and <code>parallel_fetch</code> to 2–3, then watch this page for throttling appearing.
+  </div>
+  {{end}}
+
+  {{if .RateLimits}}
+  <div class="wrap"><table>
+  <thead><tr><th>Log</th><th>Throttled responses</th><th>Share</th><th>Last status</th><th>Retry-After</th><th>Last seen</th></tr></thead>
+  <tbody>
+  {{range .RateLimits}}
+  <tr>
+    <td class="logname" title="{{.LogURL}}">{{if .LogName}}{{.LogName}}{{else}}{{.LogURL}}{{end}}</td>
+    <td class="ts">{{.Count}}</td>
+    <td><div class="bar"><i style="width:{{sharePct .Count $.MaxRateLimit}}%"></i></div></td>
+    <td class="ts">{{.LastStatus}}</td>
+    <td class="ts">{{if .RetryAfter}}{{.RetryAfter}}{{else}}—{{end}}</td>
+    <td class="age">{{formatAge .LastAt}}</td>
+  </tr>
+  {{end}}
+  </tbody>
+  </table></div>
+  {{end}}
+</div>
+
 {{if .Errors}}
 <div class="stat-row">
   <div class="stat"><div class="stat-label">Errors stored</div><div class="stat-value">{{.Total}}</div></div>
@@ -156,6 +222,13 @@ type errorsPageData struct {
 	Total         int
 	MostRecentAge string
 	Errors        []certificatetransparency.ErrorRecord
+
+	RateLimits         []certificatetransparency.RateLimitStat
+	TotalRateLimitHits int64
+	MaxRateLimit       int64
+	PipelineDepth      int64
+	PipelineCap        int64
+	PipelineSaturated  bool
 }
 
 func errorsHandler(w http.ResponseWriter, _ *http.Request) {
@@ -176,12 +249,28 @@ func errorsHandler(w http.ResponseWriter, _ *http.Request) {
 		}
 	}
 
+	rateLimits := certificatetransparency.GetRateLimitStats()
+	depth, capacity := certificatetransparency.GetPipelineDepth()
+
+	var maxRL int64
+	if len(rateLimits) > 0 {
+		maxRL = rateLimits[0].Count // GetRateLimitStats sorts worst-first
+	}
+
 	data := errorsPageData{
 		GeneratedAt:   time.Now().UTC().Format("2006-01-02 15:04:05 UTC"),
 		WindowSize:    maxDisplay,
 		Total:         total,
 		MostRecentAge: mostRecentAge,
 		Errors:        records,
+
+		RateLimits:         rateLimits,
+		TotalRateLimitHits: certificatetransparency.TotalRateLimitHits(),
+		MaxRateLimit:       maxRL,
+		PipelineDepth:      depth,
+		PipelineCap:        capacity,
+		// Over half full means fetching is outrunning downstream processing.
+		PipelineSaturated: capacity > 0 && depth*2 > capacity,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

@@ -238,7 +238,7 @@ func pollAllTreeSizes(ctx context.Context) {
 			if entry.lType == LogTypeTiled {
 				treeSize, err = fetchTiledTreeSize(pollCtx, entry)
 			} else {
-				treeSize, err = fetchRegularTreeSize(pollCtx, entry.rawURL)
+				treeSize, err = fetchRegularTreeSize(pollCtx, entry.rawURL, entry.name)
 			}
 
 			if err != nil {
@@ -260,7 +260,7 @@ func pollAllTreeSizes(ctx context.Context) {
 	wg.Wait()
 }
 
-func fetchRegularTreeSize(ctx context.Context, rawURL string) (uint64, error) {
+func fetchRegularTreeSize(ctx context.Context, rawURL, name string) (uint64, error) {
 	u := strings.TrimRight(rawURL, "/") + "/ct/v1/get-sth"
 	if !strings.HasPrefix(u, "http") {
 		u = "https://" + u
@@ -272,7 +272,7 @@ func fetchRegularTreeSize(ctx context.Context, rawURL string) (uint64, error) {
 	}
 	req.Header.Set("User-Agent", userAgent)
 
-	hc := &http.Client{}
+	hc := NewRateLimitedClient(rawURL, name, 15*time.Second)
 	resp, err := hc.Do(req)
 	if err != nil {
 		return 0, err
@@ -290,7 +290,7 @@ func fetchRegularTreeSize(ctx context.Context, rawURL string) (uint64, error) {
 }
 
 func fetchTiledTreeSize(ctx context.Context, entry *logStatusEntry) (uint64, error) {
-	hc := &http.Client{}
+	hc := NewRateLimitedClient(entry.rawURL, entry.name, 15*time.Second)
 	c, err := sunlight.NewClient(&sunlight.ClientConfig{
 		MonitoringPrefix: entry.rawURL,
 		PublicKey:        entry.publicKey,

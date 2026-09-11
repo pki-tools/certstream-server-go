@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,7 +18,6 @@ import (
 	"filippo.io/sunlight"
 	"github.com/google/certificate-transparency-go/x509"
 )
-
 
 // tiledWorker processes a single tiled (Static CT API) log.
 type tiledWorker struct {
@@ -83,9 +81,7 @@ func (tw *tiledWorker) stop() {
 
 // runWorker runs a single worker for a tiled CT log. This method is blocking.
 func (tw *tiledWorker) runWorker(ctx context.Context) error {
-	hc := &http.Client{
-		Timeout: 30 * time.Second,
-	}
+	hc := NewRateLimitedClient(tw.monitoringURL, tw.name, 30*time.Second)
 
 	client, err := sunlight.NewClient(&sunlight.ClientConfig{
 		MonitoringPrefix: tw.monitoringURL,

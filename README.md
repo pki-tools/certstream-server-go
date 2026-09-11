@@ -327,9 +327,30 @@ It auto-refreshes every 30 seconds and includes a live-filter search box. When n
 | `scan` | Orange | Scanner-level error during continuous log scanning |
 | `tree-size` | Blue | Background tree-size poll failed (used by `/log-status`) |
 | `ccadb` | Green | CCADB data download or parse failure |
+| `rate-limit` | Outlined red | Log operator returned HTTP 429 or 503 (see below) |
 | `other` | Grey | Unexpected errors not matching the above categories |
 
 The ring buffer holds the last 500 errors in memory and is reset on server restart.
+
+### Throughput diagnosis
+
+The page opens with a diagnosis panel answering the usual question: *why is this log falling behind?*
+
+Rate limiting is otherwise invisible. `certificate-transparency-go` retries HTTP 429 inside `jsonclient` (honouring `Retry-After`) and again inside `scanner.fetcher`'s own backoff loop, which retries indefinitely and logs only at klog verbosity 2. A throttled log therefore never produces a scan error — it just quietly stalls. To catch this, the server instruments its HTTP transport *below* both retry layers, so every 429/503 is counted regardless of how the library handles it.
+
+Because a heavily throttled log could otherwise evict every other error from the 500-entry window, ring-buffer notes are throttled to one per log per 30 seconds. Exact counts are kept separately and shown in the panel's table.
+
+Reading the verdict:
+
+| Verdict | Meaning | Action |
+|---|---|---|
+| **Rate limiting detected** | The operator is throttling you | **Lower** `parallel_fetch` for those logs. Raising it — or hitting Catch Up — earns more throttling and makes the backlog worse |
+| **Pipeline is backed up** | Fetching outpaces processing; the entry channel is over half full | Bottleneck is downstream (CPU, JSON encoding, slow WebSocket clients). More connections will not help. Raise `buffer_sizes.certchan`, check CPU headroom |
+| **Keeping up, no throttling** | Neither limit is being hit | Fetch rate is simply too low. Raise `scanner.batch_size` toward 1000 and `parallel_fetch` to 2–3, then re-check this page for throttling |
+
+Note that `batch_size` cannot exceed 1000 for regular logs — RFC 6962 §4.6 caps `get-entries` server-side, so requesting more returns at most 1000 anyway.
+
+The instrumented transport also raises the idle connection pool to 20 per host. Go's default is 2, so with `parallel_fetch` above 2 the surplus connections were previously torn down and re-handshaked on every batch.
 
 ---
 

@@ -82,13 +82,13 @@ func loadCustomUserAgent() bool {
 
 // Watcher describes a component that watches for new certificates in a CT log.
 type Watcher struct {
-	workers       []*worker
-	tiledWorkers  []*tiledWorker
-	workersMu     sync.RWMutex
-	wg            sync.WaitGroup
-	context       context.Context
-	certChan      chan models.Entry
-	cancelFunc    context.CancelFunc
+	workers      []*worker
+	tiledWorkers []*tiledWorker
+	workersMu    sync.RWMutex
+	wg           sync.WaitGroup
+	context      context.Context
+	certChan     chan models.Entry
+	cancelFunc   context.CancelFunc
 }
 
 // NewWatcher creates a new Watcher.
@@ -530,8 +530,8 @@ func (w *worker) stop() {
 
 // runWorker runs a single worker for a single CT log. This method is blocking.
 func (w *worker) runWorker(ctx context.Context) error {
-	hc := http.Client{Timeout: 30 * time.Second}
-	jsonClient, e := client.New(w.ctURL, &hc, jsonclient.Options{UserAgent: userAgent})
+	hc := NewRateLimitedClient(w.ctURL, w.name, 30*time.Second)
+	jsonClient, e := client.New(w.ctURL, hc, jsonclient.Options{UserAgent: userAgent})
 	if e != nil {
 		log.Printf("Error creating JSON client: %s\n", e)
 		return errCreatingClient
@@ -660,8 +660,14 @@ func (w *worker) foundPrecertCallback(rawEntry *ct.RawLogEntry) {
 func certHandler(entryChan chan models.Entry) {
 	var processed int64
 
+	certChanCap.Store(int64(cap(entryChan)))
+
 	for entry := range entryChan {
 		processed++
+
+		if processed%100 == 0 {
+			certChanDepth.Store(int64(len(entryChan)))
+		}
 
 		if processed%1000 == 0 {
 			log.Printf("Processed %d entries | Queue length: %d\n", processed, len(entryChan))
