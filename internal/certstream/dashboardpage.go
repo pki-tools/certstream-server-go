@@ -44,6 +44,14 @@ type namedSeries struct {
 	Vals []int64 `json:"vals"`
 }
 
+// shareRow is one slice of the current ingestion rate, by log or by operator.
+type shareRow struct {
+	Name    string  `json:"name"`
+	Rate    float64 `json:"rate"`
+	Percent float64 `json:"percent"`
+	Logs    int     `json:"logs"`
+}
+
 type dashStats struct {
 	CurrentRate    float64 `json:"currentRate"`
 	PeakRate       float64 `json:"peakRate"`
@@ -57,6 +65,15 @@ type dashStats struct {
 	ProcessedTotal int64   `json:"processedTotal"`
 	SampleCount    int64   `json:"sampleCount"`
 	HistorySecs    int64   `json:"historySecs"`
+
+	PrecertShare  float64 `json:"precertShare"`  // percent of processed entries that are precerts
+	PublishRate   float64 `json:"publishRate"`   // entries/sec CT as a whole is publishing
+	TotalTreeSize int64   `json:"totalTreeSize"` // combined size of every monitored log
+	Coverage      float64 `json:"coverage"`      // percent of all known entries we have consumed
+	TopOperator   string  `json:"topOperator"`
+	TopOperatorPc float64 `json:"topOperatorPc"`
+	LogsTiled     int     `json:"logsTiled"`
+	LogsRegular   int     `json:"logsRegular"`
 }
 
 type dashboardData struct {
@@ -65,6 +82,10 @@ type dashboardData struct {
 	GeneratedAt   string        `json:"generatedAt"`
 	TS            []int64       `json:"ts"`
 	Rate          []float64     `json:"rate"`
+	CertRate      []float64     `json:"certRate"`
+	PrecertRate   []float64     `json:"precertRate"`
+	Cumulative    []int64       `json:"cumulative"`
+	PublishRate   []float64     `json:"publishRate"`
 	Backlog       []int64       `json:"backlog"`
 	ClientsFull   []int64       `json:"clientsFull"`
 	ClientsLite   []int64       `json:"clientsLite"`
@@ -74,6 +95,8 @@ type dashboardData struct {
 	Laggards      []namedSeries `json:"laggards"`
 	TopLagging    []logRow      `json:"topLagging"`
 	TopRate       []logRow      `json:"topRate"`
+	ShareByLog    []shareRow    `json:"shareByLog"`
+	ShareByOp     []shareRow    `json:"shareByOperator"`
 	Stats         dashStats     `json:"stats"`
 }
 
@@ -114,6 +137,9 @@ func dashboardDataHandler(w http.ResponseWriter, r *http.Request) {
 	for _, p := range points {
 		data.TS = append(data.TS, p.TS)
 		data.Rate = append(data.Rate, round2(p.Rate))
+		data.CertRate = append(data.CertRate, round2(p.CertRate))
+		data.PrecertRate = append(data.PrecertRate, round2(p.PrecertRate))
+		data.Cumulative = append(data.Cumulative, p.Total)
 		data.Backlog = append(data.Backlog, p.TotalBehind)
 		data.ClientsFull = append(data.ClientsFull, int64(p.ClientsFull))
 		data.ClientsLite = append(data.ClientsLite, int64(p.ClientsLite))
@@ -122,9 +148,12 @@ func dashboardDataHandler(w http.ResponseWriter, r *http.Request) {
 		data.LogsBehind = append(data.LogsBehind, int64(p.LogsBehind))
 	}
 
+	data.PublishRate = buildPublishRate(since, bucketSec, data.TS)
+
 	statuses := certificatetransparency.GetLogStatuses()
 	data.TopLagging, data.TopRate = buildLeaderboards(statuses)
-	data.Stats = buildStats(points, statuses)
+	data.ShareByLog, data.ShareByOp = buildShares(statuses)
+	data.Stats = buildStats(points, statuses, data.PublishRate)
 	data.Laggards = buildLaggardSeries(data.TopLagging, statuses, since, bucketSec, data.TS)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -167,6 +196,104 @@ func buildLeaderboards(statuses []certificatetransparency.LogStatusSnapshot) (la
 		trimRows(byRate, func(r logRow) bool { return r.Rate > 0 })
 }
 
+// buildPublishRate returns how fast CT as a whole is publishing, aligned to the
+// global bucket grid so it can be plotted against our own ingestion rate.
+func buildPublishRate(since time.Time, bucketSec int64, grid []int64) []float64 {
+	if len(grid) == 0 {
+		return nil
+	}
+
+	totals, err := dashboardStore.TreeTotals(since, bucketSec)
+	if err != nil {
+		log.Printf("dashboard: tree totals query failed: %v\n", err)
+		return nil
+	}
+
+	byTS := make(map[int64]float64, len(totals))
+	for _, t := range totals {
+		byTS[t.TS] = t.PublishPS
+	}
+
+	out := make([]float64, len(grid))
+	for i, ts := range grid {
+		out[i] = round2(byTS[ts])
+	}
+
+	return out
+}
+
+// buildShares splits the current ingestion rate by log and by operator. Anything
+// past the top slots is folded into "Other" rather than being dropped, so the
+// percentages always account for the whole stream.
+func buildShares(statuses []certificatetransparency.LogStatusSnapshot) (byLog, byOperator []shareRow) {
+	const topSlots = 8
+
+	var total float64
+	perOperator := make(map[string]*shareRow)
+	logRows := make([]shareRow, 0, len(statuses))
+
+	for _, s := range statuses {
+		if s.RatePerSec <= 0 {
+			continue
+		}
+
+		total += s.RatePerSec
+		logRows = append(logRows, shareRow{Name: s.Name, Rate: s.RatePerSec, Logs: 1})
+
+		op, ok := perOperator[s.Operator]
+		if !ok {
+			op = &shareRow{Name: s.Operator}
+			perOperator[s.Operator] = op
+		}
+		op.Rate += s.RatePerSec
+		op.Logs++
+	}
+
+	if total <= 0 {
+		return nil, nil
+	}
+
+	opRows := make([]shareRow, 0, len(perOperator))
+	for _, op := range perOperator {
+		opRows = append(opRows, *op)
+	}
+
+	return topShares(logRows, total, topSlots), topShares(opRows, total, topSlots)
+}
+
+// topShares sorts by rate, keeps the top n, and folds the remainder into "Other".
+func topShares(rows []shareRow, total float64, n int) []shareRow {
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Rate > rows[j].Rate })
+
+	var out []shareRow
+	var otherRate float64
+	var otherLogs int
+
+	for i, r := range rows {
+		if i < n {
+			r.Percent = round2(r.Rate / total * 100)
+			r.Rate = round2(r.Rate)
+			out = append(out, r)
+
+			continue
+		}
+
+		otherRate += r.Rate
+		otherLogs += r.Logs
+	}
+
+	if otherRate > 0 {
+		out = append(out, shareRow{
+			Name:    "Other",
+			Rate:    round2(otherRate),
+			Percent: round2(otherRate / total * 100),
+			Logs:    otherLogs,
+		})
+	}
+
+	return out
+}
+
 // trimRows keeps at most topLogCount rows that satisfy keep.
 func trimRows(rows []logRow, keep func(logRow) bool) []logRow {
 	out := make([]logRow, 0, topLogCount)
@@ -183,20 +310,66 @@ func trimRows(rows []logRow, keep func(logRow) bool) []logRow {
 }
 
 // buildStats derives the headline figures from the window and current state.
-func buildStats(points []dashboard.GlobalPoint, statuses []certificatetransparency.LogStatusSnapshot) dashStats {
+func buildStats(points []dashboard.GlobalPoint, statuses []certificatetransparency.LogStatusSnapshot, publishRate []float64) dashStats {
+	certs := certificatetransparency.GetProcessedCerts()
+	precerts := certificatetransparency.GetProcessedPrecerts()
+
 	st := dashStats{
-		ProcessedTotal: certificatetransparency.GetProcessedCerts() + certificatetransparency.GetProcessedPrecerts(),
+		ProcessedTotal: certs + precerts,
 		LogsTotal:      len(statuses),
 	}
 
+	if total := certs + precerts; total > 0 {
+		st.PrecertShare = round2(float64(precerts) / float64(total) * 100)
+	}
+
+	var consumed uint64
+	operatorRate := make(map[string]float64)
+	var totalRate float64
+
 	for _, s := range statuses {
 		st.TotalBehind += s.Behind
+		st.TotalTreeSize += int64(s.TreeSize)
+		consumed += s.CurrentIndex
+
+		if s.Type == "Tiled" {
+			st.LogsTiled++
+		} else {
+			st.LogsRegular++
+		}
+
 		if s.TreeSize > 0 {
 			if s.Behind == 0 {
 				st.LogsLive++
 			} else {
 				st.LogsBehind++
 			}
+		}
+
+		if s.RatePerSec > 0 {
+			operatorRate[s.Operator] += s.RatePerSec
+			totalRate += s.RatePerSec
+		}
+	}
+
+	if st.TotalTreeSize > 0 {
+		st.Coverage = round2(float64(consumed) / float64(st.TotalTreeSize) * 100)
+	}
+
+	if totalRate > 0 {
+		for op, r := range operatorRate {
+			if r > st.TopOperatorPc {
+				st.TopOperator, st.TopOperatorPc = op, r
+			}
+		}
+		st.TopOperatorPc = round2(st.TopOperatorPc / totalRate * 100)
+	}
+
+	// The newest bucket carries the current CT-wide publish rate.
+	for i := len(publishRate) - 1; i >= 0; i-- {
+		if publishRate[i] > 0 {
+			st.PublishRate = publishRate[i]
+			break
 		}
 	}
 

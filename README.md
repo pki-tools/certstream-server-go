@@ -390,9 +390,18 @@ general:
 | Log health | Logs caught up vs. logs behind, over time |
 | Connected clients | WebSocket subscribers stacked by stream type (full / lite / domains-only) |
 | Fastest logs | Current entries per second, ranked |
+| Certificates processed | Cumulative growth curve over the window |
+| Certificates vs precertificates | Entries per second split by type |
+| Published vs ingested | What CT publishes across all logs, against what this server consumes |
+| Share of ingestion by operator | Percentage of the current entry stream, per operator |
+| Share of ingestion by log | Percentage of the current entry stream, per log |
 | Logs furthest behind | Table of current state with behind count, rate and estimated catch-up |
 
-Headline tiles show current/peak/average rate, certificates seen in the window, total backlog, live-vs-total log counts, connected clients and lifetime processed count.
+Both share charts keep the top eight slices and fold the remainder into **Other**, so the percentages always total 100% rather than silently dropping the tail.
+
+**Published vs ingested** is the clearest read on whether this server is keeping up globally. The published figure comes from summing every log's tree size and differencing it over time. A bucket is only compared against its predecessor when the same number of logs reported a tree size in both, because the total also jumps whenever a log is polled for the first time — without that guard, startup would register as millions of entries per second.
+
+Headline tiles show current/peak/average rate, certificates seen in the window, total backlog, live-vs-total log counts, connected clients, lifetime processed count, CT-wide publish rate, precertificate share, the busiest operator, combined size of all known logs with the percentage consumed, and the regular-vs-tiled log split.
 
 **Notes:**
 

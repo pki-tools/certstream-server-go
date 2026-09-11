@@ -155,6 +155,8 @@ func (s *Store) Prune(retention time.Duration) error {
 type GlobalPoint struct {
 	TS            int64   `json:"ts"`
 	Rate          float64 `json:"rate"`
+	CertRate      float64 `json:"certRate"`
+	PrecertRate   float64 `json:"precertRate"`
 	ClientsFull   int     `json:"clientsFull"`
 	ClientsLite   int     `json:"clientsLite"`
 	ClientsDomain int     `json:"clientsDomain"`
@@ -163,8 +165,13 @@ type GlobalPoint struct {
 	TotalBehind   int64   `json:"backlog"`
 
 	// Total is the cumulative certs+precerts counter at this bucket. It backs the
-	// derived Rate and window totals, but is not itself charted.
+	// derived Rate and window totals, and is charted as the growth curve.
 	Total int64 `json:"-"`
+
+	// certs and precerts are the separate cumulative counters behind CertRate
+	// and PrecertRate.
+	certs    int64
+	precerts int64
 
 	// lastTS is the newest sample timestamp inside the bucket. Rate is timed
 	// against this rather than the bucket floor, so a partial trailing bucket
@@ -207,6 +214,8 @@ func (s *Store) GlobalSeries(since time.Time, bucketSec int64) ([]GlobalPoint, e
 		}
 
 		p.Total = certs + precerts
+		p.certs = certs
+		p.precerts = precerts
 		p.ClientsFull = int(cf + 0.5)
 		p.ClientsLite = int(cl + 0.5)
 		p.ClientsDomain = int(cd + 0.5)
@@ -231,16 +240,27 @@ func (s *Store) GlobalSeries(since time.Time, bucketSec int64) ([]GlobalPoint, e
 func deriveRates(points []GlobalPoint) {
 	for i := 1; i < len(points); i++ {
 		dt := points[i].lastTS - points[i-1].lastTS
-		d := points[i].Total - points[i-1].Total
-		if dt > 0 && d >= 0 {
+		if dt <= 0 {
+			continue
+		}
+
+		if d := points[i].Total - points[i-1].Total; d >= 0 {
 			points[i].Rate = float64(d) / float64(dt)
+		}
+		if d := points[i].certs - points[i-1].certs; d >= 0 {
+			points[i].CertRate = float64(d) / float64(dt)
+		}
+		if d := points[i].precerts - points[i-1].precerts; d >= 0 {
+			points[i].PrecertRate = float64(d) / float64(dt)
 		}
 	}
 
 	// The first bucket has no predecessor to diff against; carry the second
-	// bucket's rate back so the chart doesn't open with a false zero.
+	// bucket's rates back so the charts don't open with a false zero.
 	if len(points) > 1 {
 		points[0].Rate = points[1].Rate
+		points[0].CertRate = points[1].CertRate
+		points[0].PrecertRate = points[1].PrecertRate
 	}
 }
 
@@ -288,6 +308,89 @@ func (s *Store) LogSeries(since time.Time, bucketSec int64, urls []string) (map[
 	}
 
 	return out, rows.Err()
+}
+
+// TreeTotalPoint is the combined tree size of every monitored log at one bucket.
+// Measured counts how many logs contributed a non-zero tree size, which is what
+// makes the derived publish rate trustworthy: the total jumps whenever a log is
+// polled for the first time, so a bucket whose measured count changed cannot be
+// compared against its predecessor.
+type TreeTotalPoint struct {
+	TS        int64
+	LastTS    int64
+	TreeSize  int64
+	Measured  int
+	PublishPS float64
+}
+
+// TreeTotals returns the aggregate tree size across all logs, bucketed. Each log
+// contributes one averaged value per bucket so that logs sampled more than once
+// in a bucket are not counted repeatedly.
+func (s *Store) TreeTotals(since time.Time, bucketSec int64) ([]TreeTotalPoint, error) {
+	if bucketSec < 1 {
+		bucketSec = 1
+	}
+
+	// MAX rather than AVG: tree size is a monotonic counter, so the newest reading
+	// in the bucket is the right one. Averaging would fold in the zeros a log
+	// carries before its first successful tree-size poll, understating early
+	// buckets and manufacturing a huge apparent jump in the next one.
+	rows, err := s.db.Query(
+		`SELECT bucket, MAX(last_ts), SUM(max_tree), SUM(measured) FROM (
+		     SELECT (ts/?)*? AS bucket, MAX(ts) AS last_ts, log_url,
+		            MAX(tree_size) AS max_tree,
+		            CASE WHEN MAX(tree_size) > 0 THEN 1 ELSE 0 END AS measured
+		     FROM log_samples
+		     WHERE ts >= ?
+		     GROUP BY bucket, log_url
+		 )
+		 GROUP BY bucket
+		 ORDER BY bucket`,
+		bucketSec, bucketSec, since.Unix(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var points []TreeTotalPoint
+
+	for rows.Next() {
+		var p TreeTotalPoint
+		var treeSize float64
+
+		if err := rows.Scan(&p.TS, &p.LastTS, &treeSize, &p.Measured); err != nil {
+			return nil, err
+		}
+
+		p.TreeSize = int64(treeSize)
+		points = append(points, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	derivePublishRate(points)
+
+	return points, nil
+}
+
+// derivePublishRate fills in how fast CT as a whole is publishing entries. It is
+// only meaningful between buckets covering the same set of measured logs; when
+// that set changes the total moves for bookkeeping reasons rather than growth.
+func derivePublishRate(points []TreeTotalPoint) {
+	for i := 1; i < len(points); i++ {
+		if points[i].Measured != points[i-1].Measured {
+			continue
+		}
+
+		dt := points[i].LastTS - points[i-1].LastTS
+		d := points[i].TreeSize - points[i-1].TreeSize
+
+		if dt > 0 && d >= 0 {
+			points[i].PublishPS = float64(d) / float64(dt)
+		}
+	}
 }
 
 // BacklogPoint is one bucketed backlog reading for a single log.

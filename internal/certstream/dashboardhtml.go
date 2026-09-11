@@ -27,6 +27,7 @@ h2{font-size:0.8125rem;font-weight:600;color:#0b0b0b;margin-bottom:2px}
 .stat{background:#fff;border-radius:10px;padding:13px 16px;box-shadow:0 1px 3px rgba(11,11,11,.06),0 0 0 1px rgba(11,11,11,.05)}
 .stat-label{font-size:0.6875rem;text-transform:uppercase;letter-spacing:.06em;color:#898781;font-weight:600}
 .stat-value{font-size:1.5rem;font-weight:700;color:#0b0b0b;margin-top:3px;line-height:1.15}
+.stat-value.is-text{font-size:1.0625rem;line-height:1.3;padding-top:3px}
 .stat-sub{font-size:0.6875rem;color:#898781;margin-top:2px}
 
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:14px;margin-bottom:14px;align-items:start}
@@ -101,6 +102,26 @@ td.num{font-variant-numeric:tabular-nums}
     <h2>Fastest logs</h2><p class="sub">Current entries per second</p>
     <div class="chart" id="c-toprate"></div>
   </div>
+  <div class="card">
+    <h2>Certificates processed</h2><p class="sub">Cumulative total since this server first recorded data</p>
+    <div class="chart" id="c-cumulative"></div>
+  </div>
+  <div class="card">
+    <h2>Certificates vs precertificates</h2><p class="sub">Entries per second by type</p>
+    <div class="chart" id="c-split"></div>
+  </div>
+  <div class="card">
+    <h2>Published vs ingested</h2><p class="sub">What CT publishes across all logs, against what this server consumes</p>
+    <div class="chart" id="c-publish"></div>
+  </div>
+  <div class="card">
+    <h2>Share of ingestion by operator</h2><p class="sub">Percentage of the current entry stream</p>
+    <div class="chart" id="c-shareop"></div>
+  </div>
+  <div class="card">
+    <h2>Share of ingestion by log</h2><p class="sub">Percentage of the current entry stream</p>
+    <div class="chart" id="c-sharelog"></div>
+  </div>
 </div>
 
 <div class="card">
@@ -136,6 +157,12 @@ function fmtRate(v){
   return v.toFixed(2);
 }
 function fmtFull(v){ return (Number(v)||0).toLocaleString('en-US'); }
+function fmtPct(v){
+  v = Number(v)||0;
+  if(v >= 10) return v.toFixed(0)+'%';
+  if(v >= 1)  return v.toFixed(1)+'%';
+  return v.toFixed(2)+'%';
+}
 function fmtDur(s){
   if(s<0) return '—';
   if(s===0) return 'Live';
@@ -351,8 +378,9 @@ function hbarChart(host, cfg){
     var hit = mk('rect',{x:0, y:y0-4, width:W, height:rowH, fill:'transparent'});
     hit.addEventListener('mousemove', function(ev){
       var r = svg.getBoundingClientRect();
+      var detail = d.detail || ((d.sub||'Value')+'<span class="tv">'+fmtFull(d.value)+'</span>');
       tip.innerHTML = '<div class="tt">'+d.label+'</div><div class="tr"><i style="background:'+cfg.color+
-        '"></i>'+(d.sub||'Value')+'<span class="tv">'+fmtFull(d.value)+'</span></div>';
+        '"></i>'+detail+'</div>';
       placeTip(host, tip, ev.clientX-r.left, ev.clientY-r.top);
     });
     hit.addEventListener('mouseleave', function(){ tip.style.opacity=0; });
@@ -362,6 +390,10 @@ function hbarChart(host, cfg){
 
 function renderStats(s){
   var live = s.logsTotal ? Math.round(s.logsLive/s.logsTotal*100) : 0;
+  var keepUp = s.publishRate > 0
+    ? (s.currentRate >= s.publishRate ? 'keeping pace' : fmtPct(s.currentRate/s.publishRate*100)+' of published')
+    : 'awaiting samples';
+
   var tiles = [
     ['Current rate',  fmtRate(s.currentRate),  'certs/sec'],
     ['Peak in window',fmtRate(s.peakRate),     'certs/sec'],
@@ -370,11 +402,19 @@ function renderStats(s){
     ['Total backlog', fmtNum(s.totalBehind),   fmtFull(s.totalBehind)+' entries behind'],
     ['Logs caught up',s.logsLive+' / '+s.logsTotal, live+'% live · '+s.logsBehind+' behind'],
     ['Clients',       String(s.clientsNow),    'connected now'],
-    ['Processed',     fmtNum(s.processedTotal),'since start']
+    ['Processed',     fmtNum(s.processedTotal),'since start'],
+    ['CT publish rate',fmtRate(s.publishRate), keepUp],
+    ['Precert share', fmtPct(s.precertShare),  'of processed entries'],
+    // Names are text, not figures — the 4th element renders them smaller so a long
+    // operator name doesn't wrap and stretch the whole tile row.
+    ['Busiest operator', s.topOperator || '—', s.topOperator ? fmtPct(s.topOperatorPc)+' of the stream' : 'awaiting rates', true],
+    ['All known entries', fmtNum(s.totalTreeSize), (Number(s.coverage)||0).toFixed(2)+'% consumed'],
+    ['Log types',     s.logsRegular+' / '+s.logsTiled, 'regular / tiled']
   ];
   document.getElementById('stats').innerHTML = tiles.map(function(t){
     return '<div class="stat"><div class="stat-label">'+t[0]+'</div>'+
-           '<div class="stat-value">'+t[1]+'</div><div class="stat-sub">'+t[2]+'</div></div>';
+           '<div class="stat-value'+(t[3]?' is-text':'')+'">'+t[1]+'</div>'+
+           '<div class="stat-sub">'+t[2]+'</div></div>';
   }).join('');
 }
 
@@ -430,6 +470,34 @@ function render(){
   hbarChart(document.getElementById('c-toprate'), {
     color:P.blue, fmt:fmtRate, sub:'Rate', emptyMsg:'No rate readings yet.',
     items:(d.topRate||[]).map(function(r){ return {label:r.name, value:r.rate, sub:'Entries/sec'}; })});
+
+  timeChart(document.getElementById('c-cumulative'), {
+    ts:d.ts, area:true, fmt:fmtNum,
+    series:[{name:'Processed', color:P.blue, vals:d.cumulative}]});
+
+  timeChart(document.getElementById('c-split'), {
+    ts:d.ts, stacked:true, fmt:fmtRate, series:[
+      {name:'Certificates',    color:P.blue,   vals:d.certRate},
+      {name:'Precertificates', color:P.orange, vals:d.precertRate}]});
+
+  timeChart(document.getElementById('c-publish'), {
+    ts:d.ts, fmt:fmtRate, series:[
+      {name:'Published by CT', color:P.orange, vals:d.publishRate},
+      {name:'Ingested here',   color:P.blue,   vals:d.rate}]});
+
+  hbarChart(document.getElementById('c-shareop'), {
+    color:P.aqua, fmt:fmtPct, emptyMsg:'No rate readings yet.',
+    items:(d.shareByOperator||[]).map(function(r){
+      return {label:r.name, value:r.percent,
+        detail:'Share<span class="tv">'+fmtPct(r.percent)+'</span>',
+        sub:'Share'}; })});
+
+  hbarChart(document.getElementById('c-sharelog'), {
+    color:P.blue, fmt:fmtPct, emptyMsg:'No rate readings yet.',
+    items:(d.shareByLog||[]).map(function(r){
+      return {label:r.name, value:r.percent,
+        detail:'Share<span class="tv">'+fmtPct(r.percent)+'</span>',
+        sub:'Share'}; })});
 }
 
 function load(){
