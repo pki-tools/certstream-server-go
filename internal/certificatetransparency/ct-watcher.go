@@ -552,6 +552,14 @@ func (w *worker) runWorker(ctx context.Context) error {
 		if startAtHead && recoveryEnabled {
 			log.Printf("No saved index for '%s', starting from current STH: %d\n", w.ctURL, w.ctIndex)
 		}
+	} else if w.ctIndex == 0 {
+		// Recovery is on but this log has no saved position, so the scanner
+		// backfills the log's entire history from index 0. On /log-status that
+		// looks identical to falling behind, but it is a cold start working
+		// through a fixed backlog, not an inability to keep up with live rate.
+		log.Printf("No saved index for '%s' and start_at_head is disabled - backfilling entire log from index 0\n", w.ctURL)
+		RecordError(w.ctURL, w.name, ErrCatBackfill,
+			"no saved index for this log, so it is backfilling from index 0 - this is a cold start, not a throughput problem. Set recovery.start_at_head: true to begin at the current STH instead")
 	}
 
 	normURL := normalizeCtlogURL(w.ctURL)

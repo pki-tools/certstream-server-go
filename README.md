@@ -328,6 +328,7 @@ It auto-refreshes every 30 seconds and includes a live-filter search box. When n
 | `tree-size` | Blue | Background tree-size poll failed (used by `/log-status`) |
 | `ccadb` | Green | CCADB data download or parse failure |
 | `rate-limit` | Outlined red | Log operator returned HTTP 429 or 503 (see below) |
+| `backfill` | Indigo | Log had no saved index and is downloading its entire history from index 0 |
 | `other` | Grey | Unexpected errors not matching the above categories |
 
 The ring buffer holds the last 500 errors in memory and is reset on server restart.
@@ -344,6 +345,7 @@ Reading the verdict:
 
 | Verdict | Meaning | Action |
 |---|---|---|
+| **Backfilling from index 0** | Logs with no saved index are downloading their entire history. Indistinguishable from falling behind on `/log-status`, but it is a cold start working through a fixed backlog | Expected after deleting `ct_index.json` or when a new log shard appears. Set `recovery.start_at_head: true` to start these live instead |
 | **Rate limiting detected** | The operator is throttling you | **Lower** `parallel_fetch` for those logs. Raising it — or hitting Catch Up — earns more throttling and makes the backlog worse |
 | **Pipeline is backed up** | Fetching outpaces processing; the entry channel is over half full | Bottleneck is downstream (CPU, JSON encoding, slow WebSocket clients). More connections will not help. Raise `buffer_sizes.certchan`, check CPU headroom |
 | **Keeping up, no throttling** | Neither limit is being hit | Fetch rate is simply too low. Raise `scanner.batch_size` toward 1000 and `parallel_fetch` to 2–3, then re-check this page for throttling |

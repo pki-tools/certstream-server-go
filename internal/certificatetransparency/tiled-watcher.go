@@ -19,6 +19,11 @@ import (
 	"github.com/google/certificate-transparency-go/x509"
 )
 
+// tiledPollInterval is how long a caught-up tiled log waits before re-checking
+// its checkpoint. It does not bound throughput: a log that is behind fetches
+// batches back-to-back without waiting.
+const tiledPollInterval = 30 * time.Second
+
 // tiledWorker processes a single tiled (Static CT API) log.
 type tiledWorker struct {
 	name          string
@@ -117,77 +122,118 @@ func (tw *tiledWorker) runWorker(ctx context.Context) error {
 		log.Printf("No saved index for tiled log '%s', starting from current tree size %d (start_at_head)\n", tw.monitoringURL, tw.ctIndex)
 	} else {
 		log.Printf("Starting tiled log '%s' from saved index %d (tree size: %d)\n", tw.monitoringURL, tw.ctIndex, treeSize)
+
+		if tw.ctIndex == 0 {
+			// See the equivalent branch in worker.runWorker: this is a cold start
+			// backfilling the whole log, not an inability to keep up.
+			RecordError(tw.monitoringURL, tw.name, ErrCatBackfill,
+				"no saved index for this log, so it is backfilling from index 0 - this is a cold start, not a throughput problem. Set recovery.start_at_head: true to begin at the current checkpoint instead")
+		}
 	}
 
-	// Poll for new entries continuously
-	ticker := time.NewTicker(30 * time.Second)
+	// A log that is behind drains batches back-to-back; only a caught-up log
+	// waits for the poll interval.
+	ticker := time.NewTicker(tiledPollInterval)
 	defer ticker.Stop()
 
 	for {
+		caughtUp, drainErr := tw.drainBatch(ctx, client)
+		if drainErr != nil {
+			return drainErr
+		}
+
+		if ctx.Err() != nil {
+			return nil
+		}
+
+		if !caughtUp {
+			// More entries are already available — fetch the next batch immediately
+			// instead of sleeping, otherwise throughput would be capped at
+			// tiled_batch_size per poll interval no matter how far behind we are.
+			continue
+		}
+
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			// Get updated checkpoint
-			checkpoint, _, err := client.Checkpoint(ctx)
-			if err != nil {
-				log.Printf("Could not get checkpoint for '%s': %s\n", tw.monitoringURL, err)
-				RecordError(tw.monitoringURL, tw.name, ErrCatCheckpoint, err.Error())
-				continue
-			}
-
-			newTreeSize := checkpoint.N
-			if newTreeSize <= tw.ctIndex {
-				// No new entries
-				continue
-			}
-
-			// Fetch new entries in batches so one log can't starve others during catch-up.
-			startIndex := tw.ctIndex
-			batchCount := 0
-			for index, entry := range client.Entries(ctx, checkpoint.Tree, startIndex) {
-				if entry == nil {
-					continue
-				}
-
-				certstreamEntry, parseErr := tw.parseTiledEntry(entry, index)
-				if parseErr != nil {
-					log.Printf("Error parsing tiled entry at index %d: %s\n", index, parseErr)
-					RecordError(tw.monitoringURL, tw.name, ErrCatParse, fmt.Sprintf("index %d: %s", index, parseErr))
-					continue
-				}
-
-				// Non-blocking context-aware send so a full channel can't freeze this goroutine
-				// and prevent context cancellation from propagating.
-				select {
-				case tw.entryChan <- certstreamEntry:
-				case <-ctx.Done():
-					return nil
-				}
-
-				tw.ctIndex = index + 1
-
-				if entry.IsPrecert {
-					atomic.AddInt64(&processedPrecerts, 1)
-				} else {
-					atomic.AddInt64(&processedCerts, 1)
-				}
-
-				batchCount++
-				if batchCount >= config.AppConfig.General.Scanner.TiledBatchSize && !IsCatchupActive(normalizeCtlogURL(tw.monitoringURL)) {
-					// Yield; next tick will continue from tw.ctIndex.
-					break
-				}
-			}
-
-			// Check if there was an error during iteration
-			if err := client.Err(); err != nil {
-				log.Printf("Error during tiled log iteration for '%s': %s\n", tw.monitoringURL, err)
-				RecordError(tw.monitoringURL, tw.name, ErrCatScan, err.Error())
-				return err
-			}
 		}
 	}
+}
+
+// drainBatch fetches at most one batch of entries, reporting whether the log has
+// caught up with the latest checkpoint. Batching bounds the work done per call so
+// the checkpoint is refreshed periodically on a fast-moving log; it deliberately
+// does not bound throughput.
+func (tw *tiledWorker) drainBatch(ctx context.Context, client *sunlight.Client) (caughtUp bool, err error) {
+	checkpoint, _, err := client.Checkpoint(ctx)
+	if err != nil {
+		log.Printf("Could not get checkpoint for '%s': %s\n", tw.monitoringURL, err)
+		RecordError(tw.monitoringURL, tw.name, ErrCatCheckpoint, err.Error())
+		// Report caught-up so the caller backs off to the ticker rather than
+		// spinning on a failing checkpoint endpoint.
+		return true, nil
+	}
+
+	if checkpoint.N <= tw.ctIndex {
+		return true, nil
+	}
+
+	batchLimit := config.AppConfig.General.Scanner.TiledBatchSize
+	if batchLimit <= 0 {
+		batchLimit = 500
+	}
+
+	batchCount := 0
+
+	for index, entry := range client.Entries(ctx, checkpoint.Tree, tw.ctIndex) {
+		if entry == nil {
+			continue
+		}
+
+		certstreamEntry, parseErr := tw.parseTiledEntry(entry, index)
+		if parseErr != nil {
+			log.Printf("Error parsing tiled entry at index %d: %s\n", index, parseErr)
+			RecordError(tw.monitoringURL, tw.name, ErrCatParse, fmt.Sprintf("index %d: %s", index, parseErr))
+			continue
+		}
+
+		// Context-aware send so a full channel can't freeze this goroutine and
+		// prevent context cancellation from propagating.
+		select {
+		case tw.entryChan <- certstreamEntry:
+		case <-ctx.Done():
+			return false, nil
+		}
+
+		tw.ctIndex = index + 1
+
+		if entry.IsPrecert {
+			atomic.AddInt64(&processedPrecerts, 1)
+		} else {
+			atomic.AddInt64(&processedCerts, 1)
+		}
+
+		batchCount++
+		if batchCount >= batchLimit {
+			break
+		}
+	}
+
+	if iterErr := client.Err(); iterErr != nil {
+		log.Printf("Error during tiled log iteration for '%s': %s\n", tw.monitoringURL, iterErr)
+		RecordError(tw.monitoringURL, tw.name, ErrCatScan, iterErr.Error())
+		return false, iterErr
+	}
+
+	if batchCount == 0 {
+		// The checkpoint claims there is more, but the iterator produced nothing.
+		// Reporting "behind" here would hot-loop on the checkpoint endpoint, so
+		// back off to the ticker and retry on the next tick.
+		return true, nil
+	}
+
+	return tw.ctIndex >= checkpoint.N, nil
 }
 
 // parseTiledEntry converts a sunlight.LogEntry to a models.Entry.

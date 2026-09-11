@@ -17,6 +17,7 @@ const (
 	ErrCatTreeSize   ErrorCategory = "tree-size"
 	ErrCatCCADB      ErrorCategory = "ccadb"
 	ErrCatRateLimit  ErrorCategory = "rate-limit"
+	ErrCatBackfill   ErrorCategory = "backfill"
 	ErrCatOther      ErrorCategory = "other"
 )
 
@@ -40,9 +41,30 @@ type errorRingBuf struct {
 
 var errRing = &errorRingBuf{}
 
+// backfillingLogs tracks which logs started this run from index 0. Kept outside
+// the ring buffer so the count survives the window filling up with other errors.
+var backfillingLogs = struct {
+	mu   sync.Mutex
+	urls map[string]struct{}
+}{urls: make(map[string]struct{})}
+
+// BackfillingLogs returns how many distinct logs began this run from index 0.
+func BackfillingLogs() int {
+	backfillingLogs.mu.Lock()
+	defer backfillingLogs.mu.Unlock()
+
+	return len(backfillingLogs.urls)
+}
+
 // RecordError appends an error to the sliding-window ring buffer.
 // It is safe to call from multiple goroutines.
 func RecordError(logURL, logName string, cat ErrorCategory, msg string) {
+	if cat == ErrCatBackfill {
+		backfillingLogs.mu.Lock()
+		backfillingLogs.urls[logURL] = struct{}{}
+		backfillingLogs.mu.Unlock()
+	}
+
 	errRing.mu.Lock()
 	errRing.buf[errRing.head] = ErrorRecord{
 		Time:     time.Now(),

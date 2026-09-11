@@ -62,6 +62,8 @@ var errorsTmpl = template.Must(template.New("errors").Funcs(template.FuncMap{
 			return "cat-ccadb"
 		case certificatetransparency.ErrCatRateLimit:
 			return "cat-ratelimit"
+		case certificatetransparency.ErrCatBackfill:
+			return "cat-backfill"
 		default:
 			return "cat-other"
 		}
@@ -106,6 +108,7 @@ tbody tr:hover td{background:#f8fafc}
 .cat-treesize   {background:#e0f2fe;color:#075985}
 .cat-ccadb      {background:#dcfce7;color:#166534}
 .cat-ratelimit  {background:#fee2e2;color:#b91c1c;box-shadow:inset 0 0 0 1px #fca5a5}
+.cat-backfill   {background:#e0e7ff;color:#3730a3}
 .cat-other      {background:#f1f5f9;color:#475569}
 
 .diag{background:#fff;border-radius:10px;padding:15px 18px;margin-bottom:18px;box-shadow:0 1px 4px rgba(0,0,0,.12),0 0 0 1px rgba(0,0,0,.05)}
@@ -117,6 +120,7 @@ tbody tr:hover td{background:#f8fafc}
 .v-rl{background:#fef2f2;color:#7f1d1d;box-shadow:inset 0 0 0 1px #fecaca}
 .v-sat{background:#fff7ed;color:#7c2d12;box-shadow:inset 0 0 0 1px #fed7aa}
 .v-ok{background:#f0fdf4;color:#14532d;box-shadow:inset 0 0 0 1px #bbf7d0}
+.v-bf{background:#eef2ff;color:#312e81;box-shadow:inset 0 0 0 1px #c7d2fe}
 .bar{position:relative;height:7px;border-radius:99px;background:#f1f5f9;overflow:hidden;min-width:90px}
 .bar i{position:absolute;left:0;top:0;bottom:0;border-radius:99px;background:#dc2626}
 </style>
@@ -131,6 +135,15 @@ tbody tr:hover td{background:#f8fafc}
 <div class="diag">
   <h2>Throughput diagnosis</h2>
   <p class="hint">Why a log falls behind: it is being throttled by the operator, or this server cannot drain what it already fetches.</p>
+
+  {{if .Backfilling}}
+  <div class="verdict v-bf">
+    <b>{{.Backfilling}} log{{if ne .Backfilling 1}}s are{{else}} is{{end}} backfilling from index 0.</b>
+    These had no saved position and <code>recovery.start_at_head</code> is disabled, so they are downloading the log's entire history.
+    On <code>/log-status</code> that is indistinguishable from falling behind, but it is a cold start working through a fixed backlog — the estimate shrinks as it catches up.
+    To start these live instead, set <code>recovery.start_at_head: true</code> and restart.
+  </div>
+  {{end}}
 
   {{if .RateLimits}}
   <div class="verdict v-rl">
@@ -229,6 +242,7 @@ type errorsPageData struct {
 	PipelineDepth      int64
 	PipelineCap        int64
 	PipelineSaturated  bool
+	Backfilling        int
 }
 
 func errorsHandler(w http.ResponseWriter, _ *http.Request) {
@@ -271,6 +285,7 @@ func errorsHandler(w http.ResponseWriter, _ *http.Request) {
 		PipelineCap:        capacity,
 		// Over half full means fetching is outrunning downstream processing.
 		PipelineSaturated: capacity > 0 && depth*2 > capacity,
+		Backfilling:       certificatetransparency.BackfillingLogs(),
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
