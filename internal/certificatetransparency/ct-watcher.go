@@ -31,6 +31,7 @@ import (
 var (
 	errCreatingClient    = errors.New("failed to create JSON client")
 	errFetchingSTHFailed = errors.New("failed to fetch STH")
+	errScannerRestart    = errors.New("scanner restart for catch-up")
 	userAgent            = getDefaultUserAgent()
 )
 
@@ -488,6 +489,16 @@ func (w *worker) startDownloadingCerts(ctx context.Context) {
 				log.Printf("Worker for '%s' failed to resolve host: %s\n", w.ctURL, workerErr)
 				RecordError(w.ctURL, w.name, ErrCatConnection, workerErr.Error())
 				return
+			} else if errors.Is(workerErr, errScannerRestart) {
+				// Planned restart to pick up catch-up settings; no sleep needed.
+				select {
+				case <-ctx.Done():
+					log.Printf("Context was cancelled; Stopping worker for '%s'\n", w.ctURL)
+					return
+				default:
+					log.Printf("Worker for '%s' restarting for catch-up\n", w.ctURL)
+					continue
+				}
 			}
 
 			log.Printf("Worker for '%s' failed with unexpected error: %s\n", w.ctURL, workerErr)
@@ -543,21 +554,59 @@ func (w *worker) runWorker(ctx context.Context) error {
 		}
 	}
 
+	normURL := normalizeCtlogURL(w.ctURL)
+
+	// Apply catch-up overrides: RFC 6962 caps get-entries at 1000.
+	batchSize := config.AppConfig.General.Scanner.BatchSize
+	parallelFetch := config.AppConfig.General.Scanner.ParallelFetch
+	numWorkers := config.AppConfig.General.Scanner.NumWorkers
+	if IsCatchupActive(normURL) {
+		batchSize = 1000
+		if parallelFetch < 4 {
+			parallelFetch = 4
+		}
+		if numWorkers < 2 {
+			numWorkers = 2
+		}
+	}
+
+	// Inner scan context: cancelled by the outer context OR by a restart signal.
+	scanCtx, scanCancel := context.WithCancel(ctx)
+	defer scanCancel()
+
+	if restartCh := GetScanRestartCh(normURL); restartCh != nil {
+		go func() {
+			select {
+			case <-restartCh:
+				scanCancel()
+			case <-scanCtx.Done():
+			}
+		}()
+	}
+
 	certScanner := scanner.NewScanner(jsonClient, scanner.ScannerOptions{
 		FetcherOptions: scanner.FetcherOptions{
-			BatchSize:     config.AppConfig.General.Scanner.BatchSize,
-			ParallelFetch: config.AppConfig.General.Scanner.ParallelFetch,
+			BatchSize:     batchSize,
+			ParallelFetch: parallelFetch,
 			StartIndex:    int64(w.ctIndex),
 			Continuous:    true,
 		},
 		Matcher:     scanner.MatchAll{},
 		PrecertOnly: false,
-		NumWorkers:  config.AppConfig.General.Scanner.NumWorkers,
+		NumWorkers:  numWorkers,
 		BufferSize:  config.AppConfig.General.BufferSizes.CTLog,
 	})
 
-	scanErr := certScanner.Scan(ctx, w.foundCertCallback, w.foundPrecertCallback)
+	scanErr := certScanner.Scan(scanCtx, w.foundCertCallback, w.foundPrecertCallback)
 	if scanErr != nil {
+		// If the inner context was cancelled but the outer one wasn't, this is a
+		// planned restart (catch-up signal), not a real scan error.
+		if scanCtx.Err() != nil && ctx.Err() == nil {
+			if latest := metrics.GetCTIndex(normURL); latest > w.ctIndex {
+				w.ctIndex = latest
+			}
+			return errScannerRestart
+		}
 		log.Println("Scan error: ", scanErr)
 		RecordError(w.ctURL, w.name, ErrCatScan, scanErr.Error())
 		return scanErr
