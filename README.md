@@ -27,6 +27,7 @@ This project is a drop-in replacement for [Calidog's certstream-server](https://
 - [Custom user agent](#custom-user-agent)
 - [CLI reference](#cli-reference)
 - [Network requirements](#network-requirements)
+- [Health checks and reverse proxies](#health-checks-and-reverse-proxies)
 - [Client tips](#client-tips)
 
 ---
@@ -79,6 +80,11 @@ webserver:
   cert_path: ""             # leave empty for plain HTTP
   cert_key_path: ""
   compression_enabled: false
+  ui:
+    enabled: false          # serve the dashboards on their own port
+    listen_addr: ""         # defaults to the websocket listener's interface
+    listen_port: 8081
+    whitelist: []           # restrict the UI by IP/CIDR
 
 prometheus:
   enabled: true
@@ -602,8 +608,48 @@ The server makes outbound HTTPS connections to:
 
 ### Inbound
 
-- `webserver.listen_port` — WebSocket clients and the `/log-status`, `/ccadb`, `/errors` and `/dashboard` pages
+- `webserver.listen_port` — WebSocket clients, `/health`, and (unless split off) the `/log-status`, `/ccadb`, `/errors` and `/dashboard` pages
+- `webserver.ui.listen_port` — the dashboards and `/health`, when `webserver.ui.enabled` is set
 - `prometheus.listen_port` — Prometheus scraping (can be the same port as above)
+
+---
+
+## Health checks and reverse proxies
+
+The WebSocket endpoints answer plain HTTP requests with **426 Upgrade Required**. That is correct — they genuinely require an upgrade — but most load balancer health checks, including HAProxy's `option httpchk`, treat anything outside 2xx/3xx as a failure and take the backend out of rotation.
+
+**`/health` is registered on every listener** and always returns 200 with a small JSON body:
+
+```json
+{"status":"ok","version":"1.9.7","uptimeSeconds":3600,"logsMonitored":92,"certificates":4820113006,"precertificates":5901224418}
+```
+
+It reports `ok` whenever the process is serving. This is deliberate: tying the status to whether logs are keeping up would pull the server out of rotation during a backlog, when it is still perfectly capable of serving clients. Use `/log-status` or `/dashboard` to judge ingestion health.
+
+```haproxy
+backend certstream_ws
+    option httpchk GET /health
+    http-check expect status 200
+    timeout tunnel 1h
+    server cs1 10.0.0.5:8080 check
+```
+
+### Splitting the web UI onto its own port
+
+WebSocket and HTTP backends want different proxy settings — the former needs long tunnel timeouts, the latter short ones. Setting `webserver.ui.enabled` moves the dashboards to a separate listener so each can be configured independently:
+
+```yaml
+webserver:
+  listen_addr: "0.0.0.0"
+  listen_port: 8080        # websockets + /health
+  ui:
+    enabled: true
+    listen_port: 8081      # dashboards + /health
+    whitelist:
+      - "10.0.0.0/8"       # keep the UI off the public internet
+```
+
+With this set, `/log-status` and friends return 404 on the websocket port, and the websocket endpoints return 404 on the UI port. `listen_addr` defaults to the websocket listener's interface. If the UI is pointed at the address and port already serving websockets, the setting is ignored and everything stays on one listener rather than failing to bind.
 
 ---
 

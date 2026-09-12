@@ -12,6 +12,26 @@ webserver:
   cert_key_path: ""
   compression_enabled: false
 
+  # Optionally serve the HTML dashboards (/log-status, /ccadb, /errors,
+  # /dashboard) on their own listener, separate from the websocket endpoints.
+  # Useful behind a reverse proxy, where the websocket backend wants long
+  # tunnel timeouts while the UI is an ordinary short-lived HTTP backend.
+  # When disabled, the dashboards are served on the websocket port as before.
+  #
+  # Note: /health is always registered on every listener regardless of this
+  # setting. Point load balancer health checks at it — the websocket endpoints
+  # answer plain HTTP with 426 Upgrade Required, which most health checks
+  # (including HAProxy's httpchk) treat as a failure.
+  ui:
+    enabled: false
+    # Defaults to the same interface as the websocket listener when left empty.
+    listen_addr: ""
+    listen_port: 8081
+    real_ip: false
+    cert_path: ""
+    cert_key_path: ""
+    whitelist: []
+
 prometheus:
   enabled: true
   listen_addr: "0.0.0.0"

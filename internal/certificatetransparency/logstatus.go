@@ -380,6 +380,16 @@ func NormalizeCtlogURL(rawURL string) string {
 	return normalizeCtlogURL(rawURL)
 }
 
+// CountMonitoredLogs returns how many logs are registered for status tracking.
+// Cheap enough for a health endpoint polled every couple of seconds, unlike
+// GetLogStatuses which builds and sorts a full snapshot.
+func CountMonitoredLogs() int {
+	logStatusReg.mu.RLock()
+	defer logStatusReg.mu.RUnlock()
+
+	return len(logStatusReg.entries)
+}
+
 // IsKnownLog reports whether the given normalised URL is registered in the status registry.
 func IsKnownLog(normURL string) bool {
 	logStatusReg.mu.RLock()

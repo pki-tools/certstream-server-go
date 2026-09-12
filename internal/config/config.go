@@ -69,6 +69,13 @@ type Config struct {
 		LiteURL            string `yaml:"lite_url"`
 		DomainsOnlyURL     string `yaml:"domains_only_url"`
 		CompressionEnabled bool   `yaml:"compression_enabled"`
+		// UI optionally moves the HTML dashboards onto their own listener, so a
+		// proxy can treat them as an ordinary HTTP backend separate from the
+		// long-lived websocket connections.
+		UI struct {
+			ServerConfig `yaml:",inline"`
+			Enabled      bool `yaml:"enabled"`
+		} `yaml:"ui"`
 	}
 	Prometheus struct {
 		ServerConfig        `yaml:",inline"`
@@ -209,6 +216,39 @@ func validateConfig(config *Config) bool {
 
 	if config.Webserver.DomainsOnlyURL == "" {
 		config.Webserver.FullURL = "/domains-only"
+	}
+
+	if config.Webserver.UI.Enabled {
+		// Default to the same interface as the websocket listener; only the port
+		// normally differs.
+		if config.Webserver.UI.ListenAddr == "" {
+			config.Webserver.UI.ListenAddr = config.Webserver.ListenAddr
+		}
+
+		if net.ParseIP(config.Webserver.UI.ListenAddr) == nil {
+			log.Fatalln("Web UI listen IP is not a valid IP: ", config.Webserver.UI.ListenAddr)
+			return false
+		}
+
+		if config.Webserver.UI.ListenPort == 0 {
+			log.Fatalln("Web UI is enabled but webserver.ui.listen_port is not set")
+			return false
+		}
+
+		if config.Webserver.UI.ListenPort == config.Webserver.ListenPort &&
+			config.Webserver.UI.ListenAddr == config.Webserver.ListenAddr {
+			log.Println("Web UI listener matches the websocket listener; serving the dashboards on the existing port")
+			config.Webserver.UI.Enabled = false
+		}
+
+		for _, ip := range config.Webserver.UI.Whitelist {
+			if net.ParseIP(ip) == nil {
+				if _, _, err := net.ParseCIDR(ip); err != nil {
+					log.Fatalln("Invalid IP in webserver.ui whitelist: ", ip)
+					return false
+				}
+			}
+		}
 	}
 
 	if config.Prometheus.Enabled {

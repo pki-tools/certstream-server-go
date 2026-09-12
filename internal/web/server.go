@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -280,6 +281,34 @@ func NewMetricsServer(networkIf string, port int, certPath, keyPath string) *Web
 	return server
 }
 
+// NewUIServer creates a plain HTTP webserver for the HTML dashboards and the
+// health endpoint, with no websocket routes. Running these on their own port
+// lets a reverse proxy apply ordinary HTTP timeouts and health checks to them,
+// separately from the long-lived websocket connections.
+func NewUIServer(cfg config.ServerConfig) *WebServer {
+	server := &WebServer{
+		networkIf: cfg.ListenAddr,
+		port:      cfg.ListenPort,
+		routes:    chi.NewRouter(),
+		certPath:  cfg.CertPath,
+		keyPath:   cfg.CertKeyPath,
+	}
+
+	server.routes.Use(middleware.Recoverer)
+
+	if cfg.RealIP {
+		server.routes.Use(middleware.RealIP)
+	}
+
+	if len(cfg.Whitelist) > 0 {
+		server.routes.Use(IPWhitelist(cfg.Whitelist))
+	}
+
+	server.initServer()
+
+	return server
+}
+
 // NewWebsocketServer starts a new webserver and initialized it with the necessary routes.
 // It also starts the broadcaster in ClientHandler as a background job and takes care of
 // setting up websocket.Upgrader.
@@ -329,9 +358,14 @@ func (ws *WebServer) Start() {
 		err = ws.server.ListenAndServe()
 	}
 
-	if err != nil {
+	// Shutdown makes ListenAndServe return ErrServerClosed. That is the normal
+	// end of a graceful stop, not a failure — treating it as fatal would exit
+	// non-zero on a clean SIGTERM and look like a crash to the supervisor.
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal("Error while serving webserver: ", err)
 	}
+
+	log.Printf("Stopped webserver on %s\n", ws.server.Addr)
 }
 
 // Stop tries to stop the webserver gracefully. If it doesn't stop within 15 seconds, it is forcefully closed.

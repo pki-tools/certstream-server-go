@@ -21,6 +21,7 @@ import (
 
 type Certstream struct {
 	webserver      *web.WebServer
+	uiServer       *web.WebServer
 	metricsServer  *web.WebServer
 	watcher        *certificatetransparency.Watcher
 	dashboardStore *dashboard.Store
@@ -44,20 +45,37 @@ func NewCertstreamServer(config config.Config) (*Certstream, error) {
 	webserver := web.NewWebsocketServer(config.Webserver.ListenAddr, config.Webserver.ListenPort, config.Webserver.CertPath, config.Webserver.CertKeyPath)
 	cs.webserver = webserver
 
+	// The dashboards go on their own listener when configured, otherwise they
+	// share the websocket server as before.
+	ui := webserver
+	if config.Webserver.UI.Enabled {
+		cs.uiServer = web.NewUIServer(config.Webserver.UI.ServerConfig)
+		ui = cs.uiServer
+		log.Printf("Serving web UI on separate listener %s:%d\n",
+			config.Webserver.UI.ListenAddr, config.Webserver.UI.ListenPort)
+	}
+
+	// Health checks must reach a listener that never answers 426, so register it
+	// on both. Registering twice on the same mux would panic, hence the guard.
+	webserver.RegisterHTTPHandler("/health", healthHandler)
+	if ui != webserver {
+		ui.RegisterHTTPHandler("/health", healthHandler)
+	}
+
 	// Register the CT log status dashboard
-	webserver.RegisterHTTPHandler("/log-status", logStatusHandler)
+	ui.RegisterHTTPHandler("/log-status", logStatusHandler)
 
 	// Register the catch-up trigger endpoint (POST only)
-	webserver.RegisterHTTPHandler("/log-status/catchup", catchupHandler)
+	ui.RegisterHTTPHandler("/log-status/catchup", catchupHandler)
 
 	// Register the CCADB CA owners dashboard
-	webserver.RegisterHTTPHandler("/ccadb", ccadbHandler)
+	ui.RegisterHTTPHandler("/ccadb", ccadbHandler)
 
 	// Register the error log dashboard
-	webserver.RegisterHTTPHandler("/errors", errorsHandler)
+	ui.RegisterHTTPHandler("/errors", errorsHandler)
 
 	// Register the historical dashboard if enabled
-	cs.setupDashboard(webserver)
+	cs.setupDashboard(ui)
 
 	// Setup metrics server
 	cs.setupMetrics(webserver)
@@ -136,6 +154,10 @@ func (cs *Certstream) Start() {
 
 	go cs.webserver.Start()
 
+	if cs.uiServer != nil {
+		go cs.uiServer.Start()
+	}
+
 	if cs.metricsServer != nil {
 		go cs.metricsServer.Start()
 	}
@@ -162,6 +184,10 @@ func (cs *Certstream) Stop() {
 
 	if cs.webserver != nil {
 		cs.webserver.Stop()
+	}
+
+	if cs.uiServer != nil {
+		cs.uiServer.Stop()
 	}
 
 	if cs.metricsServer != nil {
