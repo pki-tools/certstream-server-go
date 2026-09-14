@@ -338,6 +338,7 @@ It auto-refreshes every 30 seconds and includes a live-filter search box. When n
 | `ccadb` | Green | CCADB data download or parse failure |
 | `rate-limit` | Outlined red | Log operator returned HTTP 429 or 503 (see below) |
 | `backfill` | Indigo | Log had no saved index and is downloading its entire history from index 0 |
+| `tile` | Amber | Tiled log served 404 for a tile its checkpoint already covers (see below) |
 | `other` | Grey | Unexpected errors not matching the above categories |
 
 The ring buffer holds the last 500 errors in memory and is reset on server restart.
@@ -358,6 +359,14 @@ Reading the verdict:
 | **Rate limiting detected** | The operator is throttling you | **Lower** `parallel_fetch` for those logs. Raising it — or hitting Catch Up — earns more throttling and makes the backlog worse |
 | **Pipeline is backed up** | Fetching outpaces processing; the entry channel is over half full | Bottleneck is downstream (CPU, JSON encoding, slow WebSocket clients). More connections will not help. Raise `buffer_sizes.certchan`, check CPU headroom |
 | **Keeping up, no throttling** | Neither limit is being hit | Fetch rate is simply too low. Raise `scanner.batch_size` toward 1000 and `parallel_fetch` to 2–3, then re-check this page for throttling |
+
+### Tiled logs: 404 on a tile
+
+Static CT logs sign and publish a checkpoint before every data tile behind it is necessarily being served by their CDN, so a tile the advertised tree size already covers can briefly return 404 — reported as `tile/data/x456/118: unexpected status code 404`.
+
+The client library retries 429 and 5xx internally but treats any other non-200 as fatal, so without special handling one transient 404 tore down the whole log worker: dropping its tile cache, sleeping, and re-fetching the checkpoint over a condition that clears on its own within seconds.
+
+These are now recognised, logged under the `tile` category (throttled to one note per log per five minutes so they cannot flood the window), and retried on the next poll with progress kept. Occasional entries are normal and harmless. A log producing them continuously while its **Behind** count does not fall is a genuine problem worth raising with the operator.
 
 Note that `batch_size` cannot exceed 1000 for regular logs — RFC 6962 §4.6 caps `get-entries` server-side, so requesting more returns at most 1000 anyway.
 

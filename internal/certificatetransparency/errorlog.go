@@ -18,6 +18,7 @@ const (
 	ErrCatCCADB      ErrorCategory = "ccadb"
 	ErrCatRateLimit  ErrorCategory = "rate-limit"
 	ErrCatBackfill   ErrorCategory = "backfill"
+	ErrCatTile       ErrorCategory = "tile"
 	ErrCatOther      ErrorCategory = "other"
 )
 
@@ -78,6 +79,31 @@ func RecordError(logURL, logName string, cat ErrorCategory, msg string) {
 		errRing.size++
 	}
 	errRing.mu.Unlock()
+}
+
+// noteThrottle tracks when each key last wrote to the ring.
+var noteThrottle = struct {
+	mu   sync.Mutex
+	last map[string]time.Time
+}{last: make(map[string]time.Time)}
+
+// RecordErrorThrottled records an error at most once per interval for the given
+// key. A condition that recurs every poll would otherwise evict every other
+// error from the window, hiding the problems worth seeing.
+func RecordErrorThrottled(key string, interval time.Duration, logURL, logName string, cat ErrorCategory, msg string) {
+	now := time.Now()
+
+	noteThrottle.mu.Lock()
+	last, seen := noteThrottle.last[key]
+	due := !seen || now.Sub(last) >= interval
+	if due {
+		noteThrottle.last[key] = now
+	}
+	noteThrottle.mu.Unlock()
+
+	if due {
+		RecordError(logURL, logName, cat, msg)
+	}
 }
 
 // GetRecentErrors returns up to n most-recent error records, newest first.

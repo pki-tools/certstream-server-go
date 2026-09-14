@@ -17,6 +17,7 @@ import (
 
 	"filippo.io/sunlight"
 	"github.com/google/certificate-transparency-go/x509"
+	"golang.org/x/mod/sumdb/tlog"
 )
 
 // tiledPollInterval is how long a caught-up tiled log waits before re-checking
@@ -32,9 +33,13 @@ type tiledWorker struct {
 	publicKey     crypto.PublicKey
 	entryChan     chan models.Entry
 	ctIndex       int64
-	mu            sync.Mutex
-	running       bool
-	cancel        context.CancelFunc
+	// tree and treeSize cache the last verified checkpoint so consecutive
+	// batches can be drained without re-fetching it each time.
+	tree     tlog.Tree
+	treeSize int64
+	mu       sync.Mutex
+	running  bool
+	cancel   context.CancelFunc
 }
 
 // startDownloadingCerts starts downloading certificates from the tiled CT log. This method is blocking.
@@ -111,6 +116,11 @@ func (tw *tiledWorker) runWorker(ctx context.Context) error {
 
 	treeSize := checkpoint.N
 
+	// Seed the cache from the checkpoint just fetched, so the first batch can be
+	// drained without asking for it again.
+	tw.tree = checkpoint.Tree
+	tw.treeSize = treeSize
+
 	// If recovery is not enabled, start from the current tree size
 	recoveryEnabled := config.AppConfig.General.Recovery.Enabled
 	startAtHead := config.AppConfig.General.Recovery.StartAtHead
@@ -170,16 +180,25 @@ func (tw *tiledWorker) runWorker(ctx context.Context) error {
 // the checkpoint is refreshed periodically on a fast-moving log; it deliberately
 // does not bound throughput.
 func (tw *tiledWorker) drainBatch(ctx context.Context, client *sunlight.Client) (caughtUp bool, err error) {
-	checkpoint, _, err := client.Checkpoint(ctx)
-	if err != nil {
-		log.Printf("Could not get checkpoint for '%s': %s\n", tw.monitoringURL, err)
-		RecordError(tw.monitoringURL, tw.name, ErrCatCheckpoint, err.Error())
-		// Report caught-up so the caller backs off to the ticker rather than
-		// spinning on a failing checkpoint endpoint.
-		return true, nil
+	// Reuse the last checkpoint while it still has entries we have not consumed.
+	// Re-fetching one per batch would multiply checkpoint traffic on a log that
+	// is far behind, and would pull every tile request up against the moment a
+	// checkpoint is published, when its tiles may not have propagated yet.
+	if tw.treeSize <= tw.ctIndex {
+		checkpoint, _, cpErr := client.Checkpoint(ctx)
+		if cpErr != nil {
+			log.Printf("Could not get checkpoint for '%s': %s\n", tw.monitoringURL, cpErr)
+			RecordError(tw.monitoringURL, tw.name, ErrCatCheckpoint, cpErr.Error())
+			// Report caught-up so the caller backs off to the ticker rather than
+			// spinning on a failing checkpoint endpoint.
+			return true, nil
+		}
+
+		tw.tree = checkpoint.Tree
+		tw.treeSize = checkpoint.N
 	}
 
-	if checkpoint.N <= tw.ctIndex {
+	if tw.treeSize <= tw.ctIndex {
 		return true, nil
 	}
 
@@ -190,7 +209,7 @@ func (tw *tiledWorker) drainBatch(ctx context.Context, client *sunlight.Client) 
 
 	batchCount := 0
 
-	for index, entry := range client.Entries(ctx, checkpoint.Tree, tw.ctIndex) {
+	for index, entry := range client.Entries(ctx, tw.tree, tw.ctIndex) {
 		if entry == nil {
 			continue
 		}
@@ -225,8 +244,24 @@ func (tw *tiledWorker) drainBatch(ctx context.Context, client *sunlight.Client) 
 	}
 
 	if iterErr := client.Err(); iterErr != nil {
+		if isTileNotYetPublished(iterErr) {
+			// The signed checkpoint is ahead of the tiles actually being served.
+			// Tearing the worker down would drop the client's tile cache and
+			// re-fetch the checkpoint over a condition that clears on its own,
+			// so keep any progress made and retry on the next tick instead.
+			RecordErrorThrottled("tile404:"+tw.monitoringURL, tileNoteInterval,
+				tw.monitoringURL, tw.name, ErrCatTile,
+				"tile not published yet for the current checkpoint, retrying: "+iterErr.Error())
+
+			// Force a fresh checkpoint next time; the current one outran its data.
+			tw.treeSize = tw.ctIndex
+
+			return true, nil
+		}
+
 		log.Printf("Error during tiled log iteration for '%s': %s\n", tw.monitoringURL, iterErr)
 		RecordError(tw.monitoringURL, tw.name, ErrCatScan, iterErr.Error())
+
 		return false, iterErr
 	}
 
@@ -237,7 +272,29 @@ func (tw *tiledWorker) drainBatch(ctx context.Context, client *sunlight.Client) 
 		return true, nil
 	}
 
-	return tw.ctIndex >= checkpoint.N, nil
+	return tw.ctIndex >= tw.treeSize, nil
+}
+
+// tileNoteInterval throttles tile-unavailable notes per log, so a log whose
+// tiles lag its checkpoint cannot evict everything else from the error window.
+const tileNoteInterval = 5 * time.Minute
+
+// isTileNotYetPublished reports whether err is a 404 from fetching a tile.
+//
+// Static CT logs sign and publish a checkpoint before every data tile behind it
+// is necessarily served by their CDN, so a tile covered by the advertised tree
+// size can briefly return 404. torchwood retries 429 and 5xx internally but
+// treats any other non-200 as fatal, so this has to be recognised here. Its
+// error is unstructured, hence matching on the documented format
+// ("<path>: unexpected status code <code>").
+func isTileNotYetPublished(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	msg := err.Error()
+
+	return strings.Contains(msg, "unexpected status code 404") && strings.Contains(msg, "tile/")
 }
 
 // parseTiledEntry converts a sunlight.LogEntry to a models.Entry.

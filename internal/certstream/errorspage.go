@@ -64,6 +64,8 @@ var errorsTmpl = template.Must(template.New("errors").Funcs(template.FuncMap{
 			return "cat-ratelimit"
 		case certificatetransparency.ErrCatBackfill:
 			return "cat-backfill"
+		case certificatetransparency.ErrCatTile:
+			return "cat-tile"
 		default:
 			return "cat-other"
 		}
@@ -109,6 +111,7 @@ tbody tr:hover td{background:#f8fafc}
 .cat-ccadb      {background:#dcfce7;color:#166534}
 .cat-ratelimit  {background:#fee2e2;color:#b91c1c;box-shadow:inset 0 0 0 1px #fca5a5}
 .cat-backfill   {background:#e0e7ff;color:#3730a3}
+.cat-tile       {background:#fef3c7;color:#92400e}
 .cat-other      {background:#f1f5f9;color:#475569}
 
 .diag{background:#fff;border-radius:10px;padding:15px 18px;margin-bottom:18px;box-shadow:0 1px 4px rgba(0,0,0,.12),0 0 0 1px rgba(0,0,0,.05)}
