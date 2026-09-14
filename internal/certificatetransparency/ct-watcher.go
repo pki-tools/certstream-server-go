@@ -677,7 +677,17 @@ func certHandler(entryChan chan models.Entry) {
 
 	certChanCap.Store(int64(cap(entryChan)))
 
-	for entry := range entryChan {
+	for {
+		// Timed explicitly rather than with range, so the wait at each end of the
+		// pipeline can be attributed. See pipeline.go.
+		receiveStart := time.Now()
+
+		entry, ok := <-entryChan
+		if !ok {
+			return
+		}
+
+		received := time.Now()
 		processed++
 
 		if processed%100 == 0 {
@@ -690,8 +700,12 @@ func certHandler(entryChan chan models.Entry) {
 			web.SetExampleCert(entry)
 		}
 
+		sendStart := time.Now()
+
 		// Run json encoding in the background and send the result to the clients.
 		web.ClientHandler.Broadcast <- entry
+
+		sent := time.Now()
 
 		// Update metrics
 		url := entry.Data.Source.NormalizedURL
@@ -699,6 +713,12 @@ func certHandler(entryChan chan models.Entry) {
 		index := entry.Data.CertIndex
 
 		metrics.Inc(operator, url, index)
+
+		recordPipelineTiming(
+			received.Sub(receiveStart),
+			sent.Sub(sendStart),
+			sendStart.Sub(received)+time.Since(sent),
+		)
 	}
 }
 

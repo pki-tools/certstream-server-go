@@ -45,6 +45,35 @@ func (bm *BroadcastManager) unregisterClient(c *client) {
 	bm.clientLock.Unlock()
 }
 
+// QueueDepth returns the current and maximum depth of the broadcast channel.
+// A queue sitting near capacity means the broadcaster cannot encode and fan out
+// as fast as certificates arrive, which back-pressures the whole pipeline.
+func (bm *BroadcastManager) QueueDepth() (depth, capacity int) {
+	return len(bm.Broadcast), cap(bm.Broadcast)
+}
+
+// TotalSkippedCerts returns the number of certificates dropped across all clients
+// because their individual send buffers were full.
+func (bm *BroadcastManager) TotalSkippedCerts() uint64 {
+	bm.clientLock.RLock()
+	defer bm.clientLock.RUnlock()
+
+	var total uint64
+	for _, c := range bm.clients {
+		total += c.skippedCerts
+	}
+
+	return total
+}
+
+// ClientCount returns the total number of connected clients across all stream types.
+func (bm *BroadcastManager) ClientCount() int {
+	bm.clientLock.RLock()
+	defer bm.clientLock.RUnlock()
+
+	return len(bm.clients)
+}
+
 // ClientFullCount returns the current number of clients connected to the service on the `full` endpoint.
 func (bm *BroadcastManager) ClientFullCount() (count int64) {
 	return bm.clientCountByType(SubTypeFull)

@@ -26,6 +26,7 @@ type Certstream struct {
 	watcher        *certificatetransparency.Watcher
 	dashboardStore *dashboard.Store
 	dashboardStop  context.CancelFunc
+	statsStop      context.CancelFunc
 	config         config.Config
 }
 
@@ -73,6 +74,9 @@ func NewCertstreamServer(config config.Config) (*Certstream, error) {
 
 	// Register the error log dashboard
 	ui.RegisterHTTPHandler("/errors", errorsHandler)
+
+	// Register the system stats / bottleneck page
+	ui.RegisterHTTPHandler("/system", systemHandler)
 
 	// Register the historical dashboard if enabled
 	cs.setupDashboard(ui)
@@ -162,6 +166,11 @@ func (cs *Certstream) Start() {
 		go cs.metricsServer.Start()
 	}
 
+	// Sample runtime and pipeline counters for /system
+	statsCtx, statsCancel := context.WithCancel(context.Background())
+	cs.statsStop = statsCancel
+	StartSystemStats(statsCtx)
+
 	// Start sampling into the dashboard database
 	if cs.dashboardStore != nil {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -192,6 +201,10 @@ func (cs *Certstream) Stop() {
 
 	if cs.metricsServer != nil {
 		cs.metricsServer.Stop()
+	}
+
+	if cs.statsStop != nil {
+		cs.statsStop()
 	}
 
 	if cs.dashboardStop != nil {

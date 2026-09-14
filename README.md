@@ -18,6 +18,7 @@ This project is a drop-in replacement for [Calidog's certstream-server](https://
 - [CCADB CA owners dashboard](#ccadb-ca-owners-dashboard)
 - [Error log dashboard](#error-log-dashboard)
 - [Historical dashboard](#historical-dashboard)
+- [System stats and bottlenecks](#system-stats-and-bottlenecks)
 - [Prometheus metrics](#prometheus-metrics)
 - [Recovery and resumption](#recovery-and-resumption)
 - [Tiled log support](#tiled-log-support)
@@ -421,6 +422,45 @@ Headline tiles show current/peak/average rate, certificates seen in the window, 
 
 ---
 
+## System stats and bottlenecks
+
+**`/system`** answers a question the other pages cannot: when the server is not keeping up, is it limited by *downloading* certificates or by *processing* them?
+
+### How the bottleneck is identified
+
+Entries flow through a fixed pipeline:
+
+```
+per-log fetchers → entry channel → certHandler → broadcast channel → broadcaster → clients
+```
+
+`certHandler` sits between the two buffers, so timing how long it waits at each end pins down the constraint without attaching a profiler:
+
+| Where the time goes | Meaning | What to change |
+|---|---|---|
+| **Waiting for certificates** | The handler is starved — downloading is the limit | `scanner.batch_size`, `parallel_fetch`; check `/errors` for throttling |
+| **Blocked sending downstream** | JSON encoding and client fan-out cannot keep up — **processing** is the limit | Fewer/faster clients, prefer the lite stream, more CPU |
+| **Own work** | The handler is CPU-bound itself | A hard ceiling: this is one goroutine fanning out every certificate |
+
+The page shows this split as a bar, with a plain-language verdict. It reads the delta over the sampled window rather than cumulative totals, so it reflects current conditions rather than being dominated by startup. Sampling costs about 100 ns per certificate — negligible beside the parsing and encoding on either side.
+
+### Queues
+
+Both pipeline buffers are shown with their fill level. A queue sitting near capacity is where work is backing up:
+
+- **Entry channel** (`buffer_sizes.certchan`) full → the handler cannot keep up with downloads
+- **Broadcast channel** (`buffer_sizes.broadcastmanager`) full → encoding and fan-out cannot keep up
+
+Raising a buffer that is persistently full defers the problem rather than fixing it; it only helps absorb bursts.
+
+### Other figures
+
+Throughput (with sparkline), process CPU as a percentage of one core plus the share spent in GC, goroutine count and window peak, heap in use and GC cycles, certificates and precertificates processed, connected clients by stream type, certificates skipped for slow clients, and total 429/503 responses from log operators. A breakdown of the error ring by category links through to `/errors`.
+
+CPU figures come from `runtime/metrics` and are omitted rather than guessed at on platforms that do not report them.
+
+---
+
 ## Prometheus metrics
 
 Enable the metrics endpoint in config (`prometheus.enabled: true`). By default it is exposed at `/metrics` and restricted by IP whitelist.
@@ -608,8 +648,8 @@ The server makes outbound HTTPS connections to:
 
 ### Inbound
 
-- `webserver.listen_port` — WebSocket clients, `/health`, and (unless split off) the `/log-status`, `/ccadb`, `/errors` and `/dashboard` pages
-- `webserver.ui.listen_port` — the dashboards and `/health`, when `webserver.ui.enabled` is set
+- `webserver.listen_port` — WebSocket clients, `/health`, and (unless split off) the `/log-status`, `/ccadb`, `/errors`, `/system` and `/dashboard` pages
+- `webserver.ui.listen_port` — the dashboards, `/system` and `/health`, when `webserver.ui.enabled` is set
 - `prometheus.listen_port` — Prometheus scraping (can be the same port as above)
 
 ---
