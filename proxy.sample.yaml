@@ -1,0 +1,56 @@
+# certstream-proxy — standalone egress proxy for certstream-server-go.
+#
+# Run one of these on each additional IP address you want to fetch CT logs from,
+# then list them under general.proxies in the main server's config.
+#
+#   ./certstream-proxy --config proxy.yaml
+
+listen_addr: "0.0.0.0"
+listen_port: 8443
+
+# Shared secret the main server must present. Required, minimum 16 characters.
+# Generate one with:  openssl rand -hex 32
+auth_token: "CHANGE-ME-generate-a-long-random-token"
+
+# TLS for the proxy hop itself. Strongly recommended over the public internet:
+# without it the auth_token is sent in plaintext on every CONNECT.
+# The tunnelled CT traffic is end-to-end TLS regardless, so this protects the
+# token rather than the certificate data.
+tls:
+  cert_path: ""
+  key_path: ""
+
+# Source addresses permitted to use the proxy, as IPs or CIDRs.
+# Empty means any source may connect and only the token is checked. Setting this
+# to your main server's address is the single most effective anti-abuse control.
+allowed_ips:
+  - "203.0.113.10/32"
+
+# Destination hosts the proxy may reach. An entry starting with "." matches that
+# domain and any subdomain of it; otherwise the hostname must match exactly.
+#
+# This list is what prevents a leaked token from turning the proxy into an open
+# relay, so it fails closed: an empty list is rejected at startup.
+#
+# Confirm the hostnames your deployment actually uses on the main server's
+# /log-status page, and trim this to only those.
+allowed_hosts:
+  - ".ct.googleapis.com"
+  - ".ct.digicert.com"
+  - ".ct.cloudflare.com"
+  - ".ct.letsencrypt.org"
+  - ".ct.sectigo.com"
+  - ".ct.trustasia.com"
+  - ".ct.comodo.com"
+  - ".sunlight.geomys.org"
+
+# Destination ports. CT logs are HTTPS, so 443 alone is almost always right.
+# Keeping this tight stops the proxy being used to reach SSH, SMTP and similar.
+allowed_ports:
+  - 443
+
+dial_timeout: 10s
+idle_timeout: 2m
+
+# Upper bound on simultaneous tunnels.
+max_connections: 512

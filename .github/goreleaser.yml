@@ -5,8 +5,38 @@ before:
     - go mod download
 
 builds:
-  - main: ./cmd/certstream-server-go
+  - id: certstream-server-go
+    main: ./cmd/certstream-server-go
+    binary: certstream-server-go
     ldflags: -s -w -X github.com/pki-tools/certstream-server-go/internal/config.Version={{.Version}}
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - 386
+      - amd64
+      - arm
+      - arm64
+    ignore:
+      - goos: darwin
+        goarch: 386
+      - goos: darwin
+        goarch: arm
+      - goos: windows
+        goarch: arm
+      - goos: windows
+        goarch: arm64
+      - goos: windows
+        goarch: 386
+
+  # Standalone egress proxy, built for the same platforms as the server.
+  - id: certstream-proxy
+    main: ./cmd/certstream-proxy
+    binary: certstream-proxy
+    ldflags: -s -w -X main.version={{.Version}}
     env:
       - CGO_ENABLED=0
     goos:
@@ -38,6 +68,8 @@ dockers:
   - image_templates:
       - 'ghcr.io/pki-tools/{{.ProjectName}}:{{.Tag}}-amd64'
       - '{{ if not .Prerelease }}ghcr.io/pki-tools/{{.ProjectName}}:latest-amd64{{ end }}'
+    ids:
+      - certstream-server-go
     goarch: amd64
     use: buildx
     extra_files:
@@ -55,6 +87,8 @@ dockers:
   - image_templates:
       - 'ghcr.io/pki-tools/{{.ProjectName}}:{{.Tag}}-arm64'
       - '{{ if not .Prerelease }}ghcr.io/pki-tools/{{.ProjectName}}:latest-arm64{{ end }}'
+    ids:
+      - certstream-server-go
     goarch: arm64
     use: buildx
     extra_files:
@@ -81,9 +115,22 @@ docker_manifests:
       - 'ghcr.io/pki-tools/{{.ProjectName}}:{{.Tag}}-arm64'
 
 archives:
-  - format: binary
+  - id: server
+    ids:
+      - certstream-server-go
+    format: binary
     name_template: >-
       {{- .ProjectName }}_
+      {{- .Version}}_
+      {{- if eq .Os "darwin" }}macOS{{- else }}{{ .Os }}{{ end }}_
+      {{- if eq .Arch "386" }}i386{{- else }}{{ .Arch }}{{ end }}
+
+  - id: proxy
+    ids:
+      - certstream-proxy
+    format: binary
+    name_template: >-
+      {{- "certstream-proxy_" }}
       {{- .Version}}_
       {{- if eq .Os "darwin" }}macOS{{- else }}{{ .Os }}{{ end }}_
       {{- if eq .Arch "386" }}i386{{- else }}{{ .Arch }}{{ end }}

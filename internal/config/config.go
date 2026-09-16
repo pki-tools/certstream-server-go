@@ -51,6 +51,17 @@ type ScannerOptions struct {
 	TiledBatchSize int `yaml:"tiled_batch_size"`
 }
 
+// ProxyConfig points at a certstream-proxy instance used as an alternative
+// egress address for fetching from CT logs.
+type ProxyConfig struct {
+	// Name labels the proxy in logs and on the status pages. Defaults to its host.
+	Name string `yaml:"name"`
+	// URL is the proxy endpoint, e.g. "https://198.51.100.7:8443".
+	URL string `yaml:"url"`
+	// Token is the shared secret the proxy requires.
+	Token string `yaml:"token"`
+}
+
 type DashboardOptions struct {
 	// Enabled turns the /dashboard endpoint and its background sampler on.
 	Enabled bool `yaml:"enabled"`
@@ -91,8 +102,10 @@ type Config struct {
 		BufferSizes    BufferSizes      `yaml:"buffer_sizes"`
 		Scanner        ScannerOptions   `yaml:"scanner"`
 		Dashboard      DashboardOptions `yaml:"dashboard"`
-		DropOldLogs    *bool            `yaml:"drop_old_logs"`
-		Recovery       struct {
+		// Proxies spread CT fetching across additional egress addresses.
+		Proxies     []ProxyConfig `yaml:"proxies"`
+		DropOldLogs *bool         `yaml:"drop_old_logs"`
+		Recovery    struct {
 			Enabled     bool   `yaml:"enabled"`
 			StartAtHead bool   `yaml:"start_at_head"`
 			CTIndexFile string `yaml:"ct_index_file"`
@@ -217,6 +230,20 @@ func validateConfig(config *Config) bool {
 	if config.Webserver.DomainsOnlyURL == "" {
 		config.Webserver.FullURL = "/domains-only"
 	}
+
+	var validProxies []ProxyConfig
+	for _, p := range config.General.Proxies {
+		if p.URL == "" {
+			log.Println("Ignoring proxy entry with no url")
+			continue
+		}
+		if p.Token == "" {
+			log.Printf("Ignoring proxy %q: a token is required\n", p.URL)
+			continue
+		}
+		validProxies = append(validProxies, p)
+	}
+	config.General.Proxies = validProxies
 
 	if config.Webserver.UI.Enabled {
 		// Default to the same interface as the websocket listener; only the port

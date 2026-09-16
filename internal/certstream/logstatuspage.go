@@ -157,6 +157,7 @@ tbody tr:hover td{background:#f8fafc}
 .badge-regular{background:#dbeafe;color:#1d4ed8}
 .badge-tiled{background:#ede9fe;color:#6d28d9}
 .badge-catchup{background:#fef9c3;color:#854d0e}
+.badge-proxy{background:#e0f2fe;color:#075985}
 .eta-live{color:#15803d;font-weight:700}
 .eta-good{color:#16a34a}
 .eta-warn{color:#d97706}
@@ -210,6 +211,7 @@ button.catchup-btn:disabled{background:#93c5fd;cursor:default}
   <td data-sort="{{.Type}}">
     <span class="badge {{typeClass .Type}}">{{.Type}}</span>
     {{if isCatchupActive .CatchupUntil}}<span class="badge badge-catchup" title="Catch-up active for {{catchupRemaining .CatchupUntil}} more">&#9889; {{catchupRemaining .CatchupUntil}}</span>{{end}}
+    {{if .Proxy}}<span class="badge badge-proxy" title="Fetched via egress proxy {{.Proxy}}">&#8644; {{.Proxy}}</span>{{end}}
   </td>
   <td class="num" data-sort="{{.CurrentIndex}}">{{formatNumber .CurrentIndex}}</td>
   <td class="num" data-sort="{{.TreeSize}}">{{if gt .TreeSize 0}}{{formatNumber .TreeSize}}{{else}}<span class="age">Pending</span>{{end}}</td>

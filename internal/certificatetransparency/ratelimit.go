@@ -74,6 +74,11 @@ func newRateLimitTransport(logURL, logName string) http.RoundTripper {
 	base.MaxIdleConnsPerHost = 20
 	base.IdleConnTimeout = 90 * time.Second
 
+	// Route this log's fetches through its assigned egress proxy, when any are
+	// configured. Done on the base transport so rate-limit accounting above still
+	// sees every response.
+	applyProxy(base, logURL)
+
 	return &rateLimitTransport{base: base, logURL: logURL, logName: logName}
 }
 

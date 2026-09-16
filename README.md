@@ -29,6 +29,7 @@ This project is a drop-in replacement for [Calidog's certstream-server](https://
 - [CLI reference](#cli-reference)
 - [Network requirements](#network-requirements)
 - [Health checks and reverse proxies](#health-checks-and-reverse-proxies)
+- [Egress proxies](#egress-proxies)
 - [Client tips](#client-tips)
 
 ---
@@ -643,6 +644,16 @@ Flags:
   --create-index-file        Write ct_index.json from current log STHs and exit
 ```
 
+The release also ships `certstream-proxy`, the optional egress proxy:
+
+```
+certstream-proxy [flags]
+
+Flags:
+  --config string            Path to the proxy config file (default "config.yaml")
+  --version                  Print version and exit
+```
+
 ---
 
 ## Network requirements
@@ -699,6 +710,58 @@ webserver:
 ```
 
 With this set, `/log-status` and friends return 404 on the websocket port, and the websocket endpoints return 404 on the UI port. `listen_addr` defaults to the websocket listener's interface. If the UI is pointed at the address and port already serving websockets, the setting is ignored and everything stays on one listener rather than failing to bind.
+
+---
+
+## Egress proxies
+
+When a log throttles by source address, or the host's egress bandwidth is the ceiling, fetching can be spread across additional IP addresses. `certstream-proxy` is a second binary in this repository, published alongside the server on every release.
+
+**It will not help if the constraint is CPU or parsing.** Check `/system` first: if the CPU tile is near 100% × cores, or raising `scanner.num_workers` changes throughput, the bottleneck is local and more egress addresses will do nothing.
+
+### Running a proxy
+
+Copy `proxy.sample.yaml`, set a token, and run it on each additional address:
+
+```bash
+openssl rand -hex 32          # generate a token
+./certstream-proxy --config proxy.yaml
+```
+
+### Pointing the server at it
+
+```yaml
+general:
+  proxies:
+    - name: "eu-1"
+      url: "https://198.51.100.7:8443"
+      token: "the-same-token-as-that-proxys-auth_token"
+    - name: "us-1"
+      url: "https://198.51.100.8:8443"
+      token: "..."
+```
+
+Logs are distributed across proxies by a stable hash of the log URL, so a given log always fetches through the same egress. This is deliberate: a rate-limit bucket is per source address, so spreading one log's requests across several would be counterproductive, and pinning keeps connections reusable. `/log-status` shows each log's assigned proxy as a badge.
+
+Proxies are optional and additive — with none configured, everything fetches directly as before. An unreachable or malformed entry is skipped with a warning rather than stopping the server.
+
+### Security
+
+The proxy is deliberately narrow, because it will be found by port scanners:
+
+| Control | Behaviour |
+|---|---|
+| `auth_token` | Required, minimum 16 characters, compared in constant time. Presented as `Proxy-Authorization: Bearer …` |
+| `allowed_hosts` | **Fails closed** — an empty list is rejected at startup. This is what stops a leaked token turning the proxy into an open relay |
+| `allowed_ips` | Optional source allowlist. Setting it to the main server's address is the single most effective control |
+| `allowed_ports` | Defaults to 443 only, so the proxy cannot be used to reach SSH, SMTP or similar |
+| CONNECT only | Plain HTTP relaying is refused outright with 405 |
+| Private-range guard | Destinations are checked *after* DNS resolution, so an allowed hostname cannot be pointed at loopback, RFC 1918, link-local or CGNAT space |
+| `max_connections` | Caps simultaneous tunnels |
+
+Set `tls.cert_path` and `tls.key_path` unless the hop is already private: without TLS the token is sent in plaintext on every CONNECT. The tunnelled CT traffic is end-to-end TLS either way, so this protects the token rather than the certificate data. The proxy logs a warning at startup when TLS is off.
+
+`/healthz` is unauthenticated for load balancers and returns nothing but `ok`. `/stats` requires the token and reports uptime, active and total tunnels, rejections, and bytes transferred in each direction.
 
 ---
 

@@ -42,6 +42,7 @@ type LogStatusSnapshot struct {
 	ETA          time.Duration // 0 = live, -1 = unknown
 	TreeSizeAge  time.Duration // -1 = never fetched
 	CatchupUntil time.Time     // zero if catch-up not active
+	Proxy        string        // egress proxy name, empty when fetched directly
 }
 
 type logStatusEntry struct {
@@ -170,6 +171,7 @@ func GetLogStatuses() []LogStatusSnapshot {
 			ETA:          eta,
 			TreeSizeAge:  treeSizeAge,
 			CatchupUntil: catchupUntil,
+			Proxy:        ProxyAssignment(entry.normURL),
 		})
 	}
 

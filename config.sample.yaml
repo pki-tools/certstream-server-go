@@ -66,6 +66,19 @@ general:
   # This option defaults to true. See https://github.com/d-Rickyy-b/certstream-server-go/issues/51
   drop_old_logs: true
 
+  # Optional egress proxies. Each entry is a certstream-proxy instance running
+  # on another IP address; logs are distributed across them by a stable hash, so
+  # a given log always fetches through the same egress (its rate-limit bucket is
+  # per source address, so spreading one log's requests would be counterproductive).
+  # Leave empty to fetch everything directly. See proxy.sample.yaml.
+  proxies: []
+  #  - name: "eu-1"
+  #    url: "https://198.51.100.7:8443"
+  #    token: "the-same-token-as-that-proxys-auth_token"
+  #  - name: "us-1"
+  #    url: "https://198.51.100.8:8443"
+  #    token: "..."
+
   # Optional historical dashboard at /dashboard. Periodically snapshots log state
   # into a local SQLite file and renders charts over 1h/12h/24h/3d/7d windows,
   # covering the common cases that would otherwise need Prometheus + Grafana.
