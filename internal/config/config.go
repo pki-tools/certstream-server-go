@@ -103,8 +103,12 @@ type Config struct {
 		Scanner        ScannerOptions   `yaml:"scanner"`
 		Dashboard      DashboardOptions `yaml:"dashboard"`
 		// Proxies spread CT fetching across additional egress addresses.
-		Proxies     []ProxyConfig `yaml:"proxies"`
-		DropOldLogs *bool         `yaml:"drop_old_logs"`
+		Proxies []ProxyConfig `yaml:"proxies"`
+		// Pprof exposes Go's profiling endpoints under /debug/pprof on the web UI
+		// listener. Off by default: the profiles reveal internals and capturing one
+		// briefly costs CPU, so restrict the listener before enabling it.
+		Pprof       bool  `yaml:"pprof"`
+		DropOldLogs *bool `yaml:"drop_old_logs"`
 		Recovery    struct {
 			Enabled     bool   `yaml:"enabled"`
 			StartAtHead bool   `yaml:"start_at_head"`

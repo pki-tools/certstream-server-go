@@ -2,13 +2,13 @@ package certstream
 
 // dashboardHTML is the static shell for /dashboard. All figures are fetched from
 // /dashboard/data so switching time range never reloads the page.
-const dashboardHTML = `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CT Dashboard</title>
-<style>
+// The dashboard page is assembled from three pieces so the combined /overview
+// page can reuse them verbatim rather than duplicating the chart code. The
+// element IDs in dashboardBody are what dashboardJS renders into, so both must
+// be included together.
+
+// dashboardCSS styles the charts, stat tiles and range selector.
+const dashboardCSS = `
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;background:#f9f9f7;color:#0b0b0b;padding:24px 32px;min-height:100vh}
 h1{font-size:1.375rem;font-weight:700;margin-bottom:4px;letter-spacing:-0.01em}
@@ -56,15 +56,21 @@ td.num{font-variant-numeric:tabular-nums}
 .empty{padding:34px 10px;text-align:center;color:#898781;font-size:0.8125rem}
 .wrap{overflow-x:auto}
 @media(max-width:560px){body{padding:16px}.grid{grid-template-columns:1fr}}
-</style>
-</head>
-<body>
+`
+
+// dashboardBody is the range selector, stat tiles, chart grid and laggards table.
+// dashboardPageHeader is the standalone page's title block; /overview supplies
+// its own section heading instead.
+const dashboardPageHeader = `
 <h1>CT Dashboard</h1>
 <p class="meta">
   Updated <strong id="gen">—</strong> &nbsp;·&nbsp;
   <span id="hist">—</span> &nbsp;·&nbsp;
   Auto-refreshes every 60 s
-</p>
+</p>`
+
+// dashboardBody is the range selector, stat tiles, chart grid and laggards table.
+const dashboardBody = `
 
 <div class="rangebar" role="group" aria-label="Time range">
   <span class="lbl">Range</span>
@@ -132,7 +138,10 @@ td.num{font-variant-numeric:tabular-nums}
   </table></div>
 </div>
 
-<script>
+`
+
+// dashboardJS fetches /dashboard/data and renders every chart.
+const dashboardJS = `
 var NS = 'http://www.w3.org/2000/svg';
 var P  = {blue:'#2a78d6', orange:'#eb6834', aqua:'#1baf7a', yellow:'#eda100', magenta:'#e87ba4', red:'#e34948'};
 var INK = {grid:'#e1e0d9', axis:'#c3c2b7', muted:'#898781', surface:'#ffffff'};
@@ -434,11 +443,18 @@ function renderTable(rows){
 function render(){
   var d = state.data; if(!d) return;
 
-  document.getElementById('gen').textContent = d.generatedAt;
-  var h = d.stats.historySecs;
-  document.getElementById('hist').textContent = d.stats.sampleCount
-    ? fmtFull(d.stats.sampleCount)+' samples over '+fmtDur(h)
-    : 'No samples stored yet';
+  // The combined /overview page embeds the charts without the standalone
+  // page's title block, so these two may legitimately be absent.
+  var genEl = document.getElementById('gen');
+  if (genEl) genEl.textContent = d.generatedAt;
+
+  var histEl = document.getElementById('hist');
+  if (histEl) {
+    var h = d.stats.historySecs;
+    histEl.textContent = d.stats.sampleCount
+      ? fmtFull(d.stats.sampleCount)+' samples over '+fmtDur(h)
+      : 'No samples stored yet';
+  }
 
   renderStats(d.stats);
   renderTable(d.topLagging);
@@ -519,6 +535,17 @@ document.querySelectorAll('.rangebar button').forEach(function(b){
 var rt; window.addEventListener('resize', function(){ clearTimeout(rt); rt=setTimeout(render,150); });
 setInterval(load, 60000);
 load();
-</script>
+`
+
+// dashboardHTML is the standalone /dashboard page.
+const dashboardHTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CT Dashboard</title>
+<style>` + dashboardCSS + `</style>
+</head>
+<body>` + dashboardPageHeader + dashboardBody + `<script>` + dashboardJS + `</script>
 </body>
 </html>`

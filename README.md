@@ -18,6 +18,7 @@ This project is a drop-in replacement for [Calidog's certstream-server](https://
 - [CCADB CA owners dashboard](#ccadb-ca-owners-dashboard)
 - [Error log dashboard](#error-log-dashboard)
 - [Historical dashboard](#historical-dashboard)
+- [Combined overview page](#combined-overview-page)
 - [System stats and bottlenecks](#system-stats-and-bottlenecks)
 - [Prometheus metrics](#prometheus-metrics)
 - [Recovery and resumption](#recovery-and-resumption)
@@ -432,6 +433,16 @@ Headline tiles show current/peak/average rate, certificates seen in the window, 
 
 ---
 
+## Combined overview page
+
+**`/overview`** is every dashboard on one scrolling page: system stats, historical charts, the log table and the error log, behind a sticky section nav. It is built for a phone as much as a desktop — sections stack to one column, the stat grid reflows, and the only thing that scrolls sideways is the log table itself, inside its own card.
+
+Each section is rendered by the same template as its standalone page, so the two can never disagree. The individual pages remain available and are linked from each section heading.
+
+It refreshes every 30 seconds, preserving your scroll position and column sort — a plain meta refresh would throw both away on a page this long.
+
+---
+
 ## System stats and bottlenecks
 
 **`/system`** answers a question the other pages cannot: when the server is not keeping up, is it limited by *downloading* certificates or by *processing* them?
@@ -468,6 +479,25 @@ Raising a buffer that is persistently full defers the problem rather than fixing
 Throughput (with sparkline), process CPU as a percentage of one core plus the share spent in GC, goroutine count and window peak, heap in use and GC cycles, certificates and precertificates processed, connected clients by stream type, certificates skipped for slow clients, and total 429/503 responses from log operators. A breakdown of the error ring by category links through to `/errors`.
 
 CPU figures come from `runtime/metrics` and are omitted rather than guessed at on platforms that do not report them.
+
+### Reading the CPU figures
+
+**CPU used** is shown as a percentage of the cores this process may actually use, alongside the raw percentage of a single core. The distinction matters: a container limited to one core still reports every host core through `runtime.NumCPU`, so "100%" can mean either "one core busy on an idle 8-core box" or "completely saturated".
+
+The **Parallelism** tile shows `GOMAXPROCS / host CPUs`, plus any cgroup quota detected from `cpu.max` (v2) or `cpu.cfs_quota_us` (v1). If a quota is set below `GOMAXPROCS`, the page says so prominently: Go only became cgroup-aware for `GOMAXPROCS` in 1.25, so on older runtimes it schedules for cores it cannot actually use, adding contention on top of the cap. Setting `GOMAXPROCS` to match the quota is the fix.
+
+**CPU split** separates application work from garbage collection, and **Allocation** shows the heap allocation rate with GC pause quantiles. High GC share with a high allocation rate means the win is in allocating less, not in more cores.
+
+### Profiling
+
+Set `general.pprof: true` to expose Go's standard profiling endpoints on the web UI listener (so they inherit its IP whitelist):
+
+```bash
+go tool pprof http://host:port/debug/pprof/profile?seconds=30
+go tool pprof http://host:port/debug/pprof/heap
+```
+
+That gives the per-function breakdown the dashboards cannot — the right next step once `/system` says the process is CPU-bound. It is off by default: the profiles reveal internals, and capturing one briefly costs CPU.
 
 ---
 
@@ -668,7 +698,7 @@ The server makes outbound HTTPS connections to:
 
 ### Inbound
 
-- `webserver.listen_port` — WebSocket clients, `/health`, and (unless split off) the `/log-status`, `/ccadb`, `/errors`, `/system` and `/dashboard` pages
+- `webserver.listen_port` — WebSocket clients, `/health`, and (unless split off) the `/overview`, `/log-status`, `/ccadb`, `/errors`, `/system` and `/dashboard` pages
 - `webserver.ui.listen_port` — the dashboards, `/system` and `/health`, when `webserver.ui.enabled` is set
 - `prometheus.listen_port` — Prometheus scraping (can be the same port as above)
 

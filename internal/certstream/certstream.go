@@ -78,6 +78,14 @@ func NewCertstreamServer(config config.Config) (*Certstream, error) {
 	// Register the system stats / bottleneck page
 	ui.RegisterHTTPHandler("/system", systemHandler)
 
+	// Register the combined single-page view
+	ui.RegisterHTTPHandler("/overview", overviewHandler)
+
+	if config.General.Pprof {
+		registerPprof(ui)
+		log.Println("Profiling endpoints enabled at /debug/pprof - restrict this listener")
+	}
+
 	// Register the historical dashboard if enabled
 	cs.setupDashboard(ui)
 

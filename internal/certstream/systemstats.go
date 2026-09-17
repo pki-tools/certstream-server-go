@@ -30,6 +30,16 @@ type statSample struct {
 	HeapBytes  uint64
 	GCCycles   uint32
 
+	// UserSeconds and ScavengeSeconds break the CPU total down further, so a run
+	// dominated by GC or by the scavenger is distinguishable from real work.
+	UserSeconds     float64
+	ScavengeSeconds float64
+	// AllocBytes is cumulative heap allocation, which drives GC pressure.
+	AllocBytes uint64
+	// GCPauseP50/P99 are recent stop-the-world pause quantiles.
+	GCPauseP50 time.Duration
+	GCPauseP99 time.Duration
+
 	Timing certificatetransparency.PipelineTiming
 
 	CertChanDepth  int64
@@ -49,6 +59,10 @@ var statsRing = struct {
 var cpuMetricNames = []string{
 	"/cpu/classes/total:cpu-seconds",
 	"/cpu/classes/gc/total:cpu-seconds",
+	"/cpu/classes/user:cpu-seconds",
+	"/cpu/classes/scavenge/total:cpu-seconds",
+	"/gc/heap/allocs:bytes",
+	"/gc/pauses:seconds",
 }
 
 // StartSystemStats begins sampling runtime and pipeline counters.
@@ -80,30 +94,51 @@ func collectStatSample() {
 	}
 	metrics.Read(samples)
 
-	var cpuSeconds, gcSeconds float64
-	if samples[0].Value.Kind() == metrics.KindFloat64 {
-		cpuSeconds = samples[0].Value.Float64()
+	readFloat := func(i int) float64 {
+		if samples[i].Value.Kind() == metrics.KindFloat64 {
+			return samples[i].Value.Float64()
+		}
+
+		return 0
 	}
-	if samples[1].Value.Kind() == metrics.KindFloat64 {
-		gcSeconds = samples[1].Value.Float64()
+
+	cpuSeconds := readFloat(0)
+	gcSeconds := readFloat(1)
+	userSeconds := readFloat(2)
+	scavengeSeconds := readFloat(3)
+
+	var allocBytes uint64
+	if samples[4].Value.Kind() == metrics.KindUint64 {
+		allocBytes = samples[4].Value.Uint64()
+	}
+
+	var p50, p99 time.Duration
+	if samples[5].Value.Kind() == metrics.KindFloat64Histogram {
+		p50 = histogramQuantile(samples[5].Value.Float64Histogram(), 0.50)
+		p99 = histogramQuantile(samples[5].Value.Float64Histogram(), 0.99)
 	}
 
 	certDepth, certCap := certificatetransparency.GetPipelineDepth()
 	bcDepth, bcCap := web.ClientHandler.QueueDepth()
 
 	s := statSample{
-		At:             time.Now(),
-		Processed:      certificatetransparency.GetProcessedCerts() + certificatetransparency.GetProcessedPrecerts(),
-		CPUSeconds:     cpuSeconds,
-		GCSeconds:      gcSeconds,
-		Goroutines:     runtime.NumGoroutine(),
-		HeapBytes:      mem.HeapAlloc,
-		GCCycles:       mem.NumGC,
-		Timing:         certificatetransparency.GetPipelineTiming(),
-		CertChanDepth:  certDepth,
-		CertChanCap:    certCap,
-		BroadcastDepth: bcDepth,
-		BroadcastCap:   bcCap,
+		At:              time.Now(),
+		Processed:       certificatetransparency.GetProcessedCerts() + certificatetransparency.GetProcessedPrecerts(),
+		CPUSeconds:      cpuSeconds,
+		GCSeconds:       gcSeconds,
+		UserSeconds:     userSeconds,
+		ScavengeSeconds: scavengeSeconds,
+		AllocBytes:      allocBytes,
+		GCPauseP50:      p50,
+		GCPauseP99:      p99,
+		Goroutines:      runtime.NumGoroutine(),
+		HeapBytes:       mem.HeapAlloc,
+		GCCycles:        mem.NumGC,
+		Timing:          certificatetransparency.GetPipelineTiming(),
+		CertChanDepth:   certDepth,
+		CertChanCap:     certCap,
+		BroadcastDepth:  bcDepth,
+		BroadcastCap:    bcCap,
 	}
 
 	statsRing.mu.Lock()
@@ -215,4 +250,74 @@ func cpuPercentOver(samples []statSample) (total, gc float64, known bool) {
 	return (last.CPUSeconds - first.CPUSeconds) / elapsed * 100,
 		(last.GCSeconds - first.GCSeconds) / elapsed * 100,
 		true
+}
+
+// histogramQuantile approximates a quantile from a runtime/metrics histogram.
+// Counts are cumulative for the process lifetime, so these describe pause
+// behaviour since startup rather than only the recent window.
+func histogramQuantile(h *metrics.Float64Histogram, q float64) time.Duration {
+	if h == nil || len(h.Counts) == 0 {
+		return 0
+	}
+
+	var total uint64
+	for _, c := range h.Counts {
+		total += c
+	}
+
+	if total == 0 {
+		return 0
+	}
+
+	target := uint64(float64(total) * q)
+
+	var running uint64
+	for i, c := range h.Counts {
+		running += c
+		if running >= target {
+			// Bucket i covers [Buckets[i], Buckets[i+1]); report its upper edge.
+			if i+1 < len(h.Buckets) {
+				return time.Duration(h.Buckets[i+1] * float64(time.Second))
+			}
+
+			return time.Duration(h.Buckets[i] * float64(time.Second))
+		}
+	}
+
+	return 0
+}
+
+// allocRateOver returns bytes allocated per second across the window.
+func allocRateOver(samples []statSample) float64 {
+	if len(samples) < 2 {
+		return 0
+	}
+
+	first, last := samples[0], samples[len(samples)-1]
+
+	elapsed := last.At.Sub(first.At).Seconds()
+	if elapsed <= 0 || last.AllocBytes < first.AllocBytes {
+		return 0
+	}
+
+	return float64(last.AllocBytes-first.AllocBytes) / elapsed
+}
+
+// cpuClassesOver returns user and GC CPU across the window, each as a
+// percentage of one core.
+func cpuClassesOver(samples []statSample) (user, gc, scavenge float64) {
+	if len(samples) < 2 {
+		return 0, 0, 0
+	}
+
+	first, last := samples[0], samples[len(samples)-1]
+
+	elapsed := last.At.Sub(first.At).Seconds()
+	if elapsed <= 0 {
+		return 0, 0, 0
+	}
+
+	return (last.UserSeconds - first.UserSeconds) / elapsed * 100,
+		(last.GCSeconds - first.GCSeconds) / elapsed * 100,
+		(last.ScavengeSeconds - first.ScavengeSeconds) / elapsed * 100
 }

@@ -41,6 +41,12 @@ type systemPageData struct {
 
 	CPUPercent   float64
 	GCPercent    float64
+	UserPercent  float64
+	Saturation   float64
+	CPU          CPUCapacity
+	AllocRateMB  float64
+	GCPauseP50   string
+	GCPauseP99   string
 	CPUKnown     bool
 	Goroutines   int
 	HeapMB       float64
@@ -66,158 +72,105 @@ type categoryCount struct {
 	Count    int
 }
 
-var systemTmpl = template.Must(template.New("system").Funcs(template.FuncMap{
-	"pct":  func(v float64) string { return fmt.Sprintf("%.1f%%", v) },
-	"pct0": func(v float64) string { return fmt.Sprintf("%.0f%%", v) },
-	"f1":   func(v float64) string { return fmt.Sprintf("%.1f", v) },
-	// Accepts any integer kind: the page mixes int, int64, uint32 and uint64, and
-	// a typed parameter would fail at execution time rather than compile time.
-	"num": func(v any) string {
-		var s string
-		switch n := v.(type) {
-		case int:
-			s = strconv.Itoa(n)
-		case int64:
-			s = strconv.FormatInt(n, 10)
-		case uint32:
-			s = strconv.FormatUint(uint64(n), 10)
-		case uint64:
-			s = strconv.FormatUint(n, 10)
-		default:
-			s = fmt.Sprintf("%v", v)
-		}
-
-		var b strings.Builder
-		off := len(s) % 3
-		for i, c := range s {
-			if i > 0 && (i-off)%3 == 0 {
-				b.WriteByte(',')
+func systemFuncs() template.FuncMap {
+	return template.FuncMap{
+		"pct":  func(v float64) string { return fmt.Sprintf("%.1f%%", v) },
+		"pct0": func(v float64) string { return fmt.Sprintf("%.0f%%", v) },
+		"f1":   func(v float64) string { return fmt.Sprintf("%.1f", v) },
+		// Accepts any integer kind: the page mixes int, int64, uint32 and uint64, and
+		// a typed parameter would fail at execution time rather than compile time.
+		"num": func(v any) string {
+			var s string
+			switch n := v.(type) {
+			case int:
+				s = strconv.Itoa(n)
+			case int64:
+				s = strconv.FormatInt(n, 10)
+			case uint32:
+				s = strconv.FormatUint(uint64(n), 10)
+			case uint64:
+				s = strconv.FormatUint(n, 10)
+			default:
+				s = fmt.Sprintf("%v", v)
 			}
-			b.WriteRune(c)
-		}
-		return b.String()
-	},
-	"rate": func(v float64) string {
-		if v >= 100 {
-			return fmt.Sprintf("%.0f", v)
-		}
-		if v >= 10 {
-			return fmt.Sprintf("%.1f", v)
-		}
-		return fmt.Sprintf("%.2f", v)
-	},
-	// spark renders a sparkline as an SVG polyline scaled to the series maximum.
-	"spark": func(vals []float64) template.HTML {
-		if len(vals) < 2 {
-			return ""
-		}
-		var max float64
-		for _, v := range vals {
-			if v > max {
-				max = v
+
+			var b strings.Builder
+			off := len(s) % 3
+			for i, c := range s {
+				if i > 0 && (i-off)%3 == 0 {
+					b.WriteByte(',')
+				}
+				b.WriteRune(c)
 			}
-		}
-		if max <= 0 {
-			max = 1
-		}
-		var b strings.Builder
-		for i, v := range vals {
-			x := float64(i) / float64(len(vals)-1) * 100
-			y := 26 - (v/max)*24
-			fmt.Fprintf(&b, "%.2f,%.2f ", x, y)
-		}
-		return template.HTML(`<svg class="spark" viewBox="0 0 100 28" preserveAspectRatio="none">` +
-			`<polyline points="` + strings.TrimSpace(b.String()) + `"/></svg>`)
-	},
-	"barClass": func(p float64) string {
-		switch {
-		case p >= 75:
-			return "q-hot"
-		case p >= 40:
-			return "q-warm"
-		default:
-			return "q-cool"
-		}
-	},
-	"stageClass": func(stage string) string {
-		switch stage {
-		case "Broadcasting", "Entry handling":
-			return "v-hot"
-		case "Fetching":
-			return "v-cool"
-		default:
-			return "v-idle"
-		}
-	},
-}).Parse(`<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta http-equiv="refresh" content="10">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>System Stats</title>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;background:#f9f9f7;color:#0b0b0b;padding:24px 32px;min-height:100vh}
-h1{font-size:1.375rem;font-weight:700;margin-bottom:4px}
-h2{font-size:0.9375rem;font-weight:700;margin-bottom:2px}
-.meta{font-size:0.8125rem;color:#52514e;margin-bottom:18px}
-.meta strong{color:#0b0b0b}
-.sub{font-size:0.75rem;color:#898781;margin-bottom:12px}
-.card{background:#fff;border-radius:10px;padding:16px 18px;margin-bottom:14px;box-shadow:0 1px 3px rgba(11,11,11,.06),0 0 0 1px rgba(11,11,11,.05)}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:14px;margin-bottom:14px;align-items:start}
+			return b.String()
+		},
+		"rate": func(v float64) string {
+			if v >= 100 {
+				return fmt.Sprintf("%.0f", v)
+			}
+			if v >= 10 {
+				return fmt.Sprintf("%.1f", v)
+			}
+			return fmt.Sprintf("%.2f", v)
+		},
+		// spark renders a sparkline as an SVG polyline scaled to the series maximum.
+		"spark": func(vals []float64) template.HTML {
+			if len(vals) < 2 {
+				return ""
+			}
+			var max float64
+			for _, v := range vals {
+				if v > max {
+					max = v
+				}
+			}
+			if max <= 0 {
+				max = 1
+			}
+			var b strings.Builder
+			for i, v := range vals {
+				x := float64(i) / float64(len(vals)-1) * 100
+				y := 26 - (v/max)*24
+				fmt.Fprintf(&b, "%.2f,%.2f ", x, y)
+			}
+			return template.HTML(`<svg class="spark" viewBox="0 0 100 28" preserveAspectRatio="none">` +
+				`<polyline points="` + strings.TrimSpace(b.String()) + `"/></svg>`)
+		},
+		"barClass": func(p float64) string {
+			switch {
+			case p >= 75:
+				return "q-hot"
+			case p >= 40:
+				return "q-warm"
+			default:
+				return "q-cool"
+			}
+		},
+		"stageClass": func(stage string) string {
+			switch stage {
+			case "Broadcasting", "Entry handling":
+				return "v-hot"
+			case "Fetching":
+				return "v-cool"
+			default:
+				return "v-idle"
+			}
+		},
+	}
+}
 
-.verdict{border-radius:9px;padding:13px 16px;font-size:0.875rem;line-height:1.55;margin-bottom:14px}
-.verdict b{font-weight:700}
-.v-hot{background:#fff7ed;color:#7c2d12;box-shadow:inset 0 0 0 1px #fed7aa}
-.v-cool{background:#eff6ff;color:#1e3a8a;box-shadow:inset 0 0 0 1px #bfdbfe}
-.v-idle{background:#f8fafc;color:#475569;box-shadow:inset 0 0 0 1px #e2e8f0}
+// systemSectionMarkup is the body of the system page without its own heading,
+// so both /system and the combined /overview render identical content.
+const systemSectionMarkup = `
 
-.split{display:flex;height:26px;border-radius:7px;overflow:hidden;margin:12px 0 6px;background:#f1f5f9}
-.split div{display:flex;align-items:center;justify-content:center;font-size:0.6875rem;font-weight:700;color:#fff;white-space:nowrap;overflow:hidden}
-.s-in{background:#2a78d6}
-.s-out{background:#eb6834}
-.s-busy{background:#1baf7a}
-.splitkey{display:flex;gap:16px;flex-wrap:wrap;font-size:0.6875rem;color:#52514e}
-.splitkey span{display:inline-flex;align-items:center;gap:6px}
-.splitkey i{width:9px;height:9px;border-radius:2px}
-
-.q{margin-bottom:14px}
-.q:last-child{margin-bottom:0}
-.q-head{display:flex;justify-content:space-between;font-size:0.8125rem;margin-bottom:5px}
-.q-name{font-weight:600}
-.q-val{font-variant-numeric:tabular-nums;color:#52514e}
-.q-detail{font-size:0.6875rem;color:#898781;margin-top:4px}
-.track{height:9px;border-radius:99px;background:#f1f5f9;overflow:hidden}
-.track i{display:block;height:100%;border-radius:99px}
-.q-cool i{background:#1baf7a}
-.q-warm i{background:#eda100}
-.q-hot i{background:#e34948}
-
-.stat-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
-.stat{background:#fff;border-radius:10px;padding:13px 16px;box-shadow:0 1px 3px rgba(11,11,11,.06),0 0 0 1px rgba(11,11,11,.05)}
-.stat-label{font-size:0.6875rem;text-transform:uppercase;letter-spacing:.06em;color:#898781;font-weight:600}
-.stat-value{font-size:1.5rem;font-weight:700;margin-top:3px;line-height:1.15}
-.stat-sub{font-size:0.6875rem;color:#898781;margin-top:2px}
-.spark{width:100%;height:28px;margin-top:6px;display:block}
-.spark polyline{fill:none;stroke:#2a78d6;stroke-width:1.5;vector-effect:non-scaling-stroke}
-
-table{width:100%;border-collapse:collapse;font-size:0.8125rem}
-th{padding:7px 10px;text-align:left;color:#52514e;font-weight:600;font-size:0.6875rem;text-transform:uppercase;letter-spacing:.06em;background:#f9f9f7}
-td{padding:7px 10px;border-top:1px solid #f0efec}
-td.n{font-variant-numeric:tabular-nums;text-align:right}
-a{color:#2a78d6}
-@media(max-width:560px){body{padding:16px}.grid{grid-template-columns:1fr}}
-</style>
-</head>
-<body>
-<h1>System Stats</h1>
-<p class="meta">
-  Generated <strong>{{.GeneratedAt}}</strong> &nbsp;·&nbsp;
-  Up <strong>{{.Uptime}}</strong> &nbsp;·&nbsp;
-  v{{.Version}} · {{.GoVersion}} · {{.NumCPU}} CPU &nbsp;·&nbsp;
-  Refreshes every 10 s
-</p>
+{{if .CPU.Mismatch}}
+<div class="verdict v-hot" style="margin-bottom:14px">
+  <b>CPU quota is below GOMAXPROCS.</b>
+  This process is limited to {{f1 .CPU.Limit}} core{{if ne .CPU.Limit 1.0}}s{{end}} by a {{.CPU.QuotaSource}} quota, but the Go runtime is scheduling for {{.CPU.GOMAXPROCS}}.
+  Go only reads cgroup CPU quotas from 1.25 onward, so on older runtimes it oversubscribes against a limit it cannot see, adding scheduling overhead on top of the cap.
+  Set <code>GOMAXPROCS={{f1 .CPU.Limit}}</code> to match, or raise the quota.
+</div>
+{{end}}
 
 <div class="card">
   <h2>Where the bottleneck is</h2>
@@ -278,10 +231,25 @@ a{color:#2a78d6}
     {{spark .RateSpark}}
   </div>
   <div class="stat">
-    <div class="stat-label">CPU</div>
-    <div class="stat-value">{{if .CPUKnown}}{{pct0 .CPUPercent}}{{else}}—{{end}}</div>
-    <div class="stat-sub">{{if .CPUKnown}}of one core · {{pct .GCPercent}} in GC{{else}}not reported on this platform{{end}}</div>
+    <div class="stat-label">CPU used</div>
+    <div class="stat-value">{{if .CPUKnown}}{{pct0 .Saturation}}{{else}}—{{end}}</div>
+    <div class="stat-sub">{{if .CPUKnown}}of {{f1 .CPU.Limit}} available core{{if ne .CPU.Limit 1.0}}s{{end}} · {{pct0 .CPUPercent}} of one core{{else}}not reported on this platform{{end}}</div>
     {{if .CPUKnown}}{{spark .CPUSpark}}{{end}}
+  </div>
+  <div class="stat">
+    <div class="stat-label">CPU split</div>
+    <div class="stat-value is-small">{{pct .UserPercent}} / {{pct .GCPercent}}</div>
+    <div class="stat-sub">application / garbage collection</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Allocation</div>
+    <div class="stat-value">{{f1 .AllocRateMB}}</div>
+    <div class="stat-sub">MB/sec · GC pause {{.GCPauseP50}} p50, {{.GCPauseP99}} p99</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Parallelism</div>
+    <div class="stat-value is-small">{{.CPU.GOMAXPROCS}} / {{.CPU.NumCPU}}</div>
+    <div class="stat-sub">GOMAXPROCS / host CPUs{{if .CPU.QuotaSource}} · {{.CPU.QuotaSource}} limit {{f1 .CPU.Limit}}{{end}}</div>
   </div>
   <div class="stat">
     <div class="stat-label">Goroutines</div>
@@ -314,13 +282,101 @@ a{color:#2a78d6}
     <div class="stat-sub">429/503 from log operators</div>
   </div>
 </div>
-</body>
+`
+
+// systemPageHeader is the standalone page's title block.
+const systemPageHeader = `
+<h1>System Stats</h1>
+<p class="meta">
+  Generated <strong>{{.GeneratedAt}}</strong> &nbsp;·&nbsp;
+  Up <strong>{{.Uptime}}</strong> &nbsp;·&nbsp;
+  v{{.Version}} · {{.GoVersion}} · {{.NumCPU}} CPU &nbsp;·&nbsp;
+  Refreshes every 10 s
+</p>`
+
+// systemSectionCSS styles this page, shared with the combined /overview page.
+const systemSectionCSS = `
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;background:#f9f9f7;color:#0b0b0b;padding:24px 32px;min-height:100vh}
+h1{font-size:1.375rem;font-weight:700;margin-bottom:4px}
+h2{font-size:0.9375rem;font-weight:700;margin-bottom:2px}
+.meta{font-size:0.8125rem;color:#52514e;margin-bottom:18px}
+.meta strong{color:#0b0b0b}
+.sub{font-size:0.75rem;color:#898781;margin-bottom:12px}
+.card{background:#fff;border-radius:10px;padding:16px 18px;margin-bottom:14px;box-shadow:0 1px 3px rgba(11,11,11,.06),0 0 0 1px rgba(11,11,11,.05)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:14px;margin-bottom:14px;align-items:start}
+
+.verdict{border-radius:9px;padding:13px 16px;font-size:0.875rem;line-height:1.55;margin-bottom:14px}
+.verdict b{font-weight:700}
+.v-hot{background:#fff7ed;color:#7c2d12;box-shadow:inset 0 0 0 1px #fed7aa}
+.v-cool{background:#eff6ff;color:#1e3a8a;box-shadow:inset 0 0 0 1px #bfdbfe}
+.v-idle{background:#f8fafc;color:#475569;box-shadow:inset 0 0 0 1px #e2e8f0}
+
+.split{display:flex;height:26px;border-radius:7px;overflow:hidden;margin:12px 0 6px;background:#f1f5f9}
+.split div{display:flex;align-items:center;justify-content:center;font-size:0.6875rem;font-weight:700;color:#fff;white-space:nowrap;overflow:hidden}
+.s-in{background:#2a78d6}
+.s-out{background:#eb6834}
+.s-busy{background:#1baf7a}
+.splitkey{display:flex;gap:16px;flex-wrap:wrap;font-size:0.6875rem;color:#52514e}
+.splitkey span{display:inline-flex;align-items:center;gap:6px}
+.splitkey i{width:9px;height:9px;border-radius:2px}
+
+.q{margin-bottom:14px}
+.q:last-child{margin-bottom:0}
+.q-head{display:flex;justify-content:space-between;font-size:0.8125rem;margin-bottom:5px}
+.q-name{font-weight:600}
+.q-val{font-variant-numeric:tabular-nums;color:#52514e}
+.q-detail{font-size:0.6875rem;color:#898781;margin-top:4px}
+.track{height:9px;border-radius:99px;background:#f1f5f9;overflow:hidden}
+.track i{display:block;height:100%;border-radius:99px}
+.q-cool i{background:#1baf7a}
+.q-warm i{background:#eda100}
+.q-hot i{background:#e34948}
+
+.stat-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.stat{background:#fff;border-radius:10px;padding:13px 16px;box-shadow:0 1px 3px rgba(11,11,11,.06),0 0 0 1px rgba(11,11,11,.05)}
+.stat-label{font-size:0.6875rem;text-transform:uppercase;letter-spacing:.06em;color:#898781;font-weight:600}
+.stat-value{font-size:1.5rem;font-weight:700;margin-top:3px;line-height:1.15}
+.stat-value.is-small{font-size:1.125rem;line-height:1.3;padding-top:4px}
+.stat-sub{font-size:0.6875rem;color:#898781;margin-top:2px}
+.spark{width:100%;height:28px;margin-top:6px;display:block}
+.spark polyline{fill:none;stroke:#2a78d6;stroke-width:1.5;vector-effect:non-scaling-stroke}
+
+table{width:100%;border-collapse:collapse;font-size:0.8125rem}
+th{padding:7px 10px;text-align:left;color:#52514e;font-weight:600;font-size:0.6875rem;text-transform:uppercase;letter-spacing:.06em;background:#f9f9f7}
+td{padding:7px 10px;border-top:1px solid #f0efec}
+td.n{font-variant-numeric:tabular-nums;text-align:right}
+a{color:#2a78d6}
+@media(max-width:560px){body{padding:16px}.grid{grid-template-columns:1fr}}
+`
+
+var systemTmpl = template.Must(template.New("system").Funcs(systemFuncs()).
+	Parse(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="refresh" content="10">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>System Stats</title>
+<style>` + systemSectionCSS + `</style>
+</head>
+<body>` + systemPageHeader + systemSectionMarkup + `</body>
 </html>`))
 
-func systemHandler(w http.ResponseWriter, _ *http.Request) {
+// systemSectionTmpl renders just the section, for embedding in /overview. It
+// carries its own FuncMap because the pages' helpers collide by name.
+var systemSectionTmpl = template.Must(template.New("system-section").
+	Funcs(systemFuncs()).Parse(systemSectionMarkup))
+
+// buildSystemPageData gathers everything the page renders, split out so the
+// combined /overview page can reuse it.
+func buildSystemPageData() systemPageData {
+
 	samples := snapshotSamples()
 
 	cpu, gc, cpuKnown := cpuPercentOver(samples)
+	user, _, _ := cpuClassesOver(samples)
+	capacity := DetectCPUCapacity()
 
 	data := systemPageData{
 		GeneratedAt: time.Now().UTC().Format("2006-01-02 15:04:05 UTC"),
@@ -334,6 +390,10 @@ func systemHandler(w http.ResponseWriter, _ *http.Request) {
 		Precerts:    certificatetransparency.GetProcessedPrecerts(),
 		CPUPercent:  cpu,
 		GCPercent:   gc,
+		UserPercent: user,
+		Saturation:  capacity.Saturation(cpu),
+		CPU:         capacity,
+		AllocRateMB: allocRateOver(samples) / (1024 * 1024),
 		CPUKnown:    cpuKnown,
 		Goroutines:  runtime.NumGoroutine(),
 		SamplesHeld: len(samples),
@@ -354,6 +414,8 @@ func systemHandler(w http.ResponseWriter, _ *http.Request) {
 		last := samples[n-1]
 		data.HeapMB = float64(last.HeapBytes) / (1024 * 1024)
 		data.GCCycles = last.GCCycles
+		data.GCPauseP50 = formatPause(last.GCPauseP50)
+		data.GCPauseP99 = formatPause(last.GCPauseP99)
 
 		data.Queues = []queueView{
 			{
@@ -379,6 +441,12 @@ func systemHandler(w http.ResponseWriter, _ *http.Request) {
 
 	data.RateSpark, data.CPUSpark = buildSparks(samples)
 	data.ErrorCounts = errorCategoryCounts()
+
+	return data
+}
+
+func systemHandler(w http.ResponseWriter, _ *http.Request) {
+	data := buildSystemPageData()
 
 	// Render into a buffer first. Executing straight to the ResponseWriter commits
 	// a 200 and partial HTML before any failure surfaces, which looks like a
@@ -462,5 +530,19 @@ func formatUptime(d time.Duration) string {
 		return fmt.Sprintf("%dh %dm", hours, mins)
 	default:
 		return fmt.Sprintf("%dm %ds", mins, int(d.Seconds())%60)
+	}
+}
+
+// formatPause renders a GC pause duration compactly.
+func formatPause(d time.Duration) string {
+	switch {
+	case d <= 0:
+		return "—"
+	case d < time.Microsecond:
+		return fmt.Sprintf("%dns", d.Nanoseconds())
+	case d < time.Millisecond:
+		return fmt.Sprintf("%.0fus", float64(d.Nanoseconds())/1000)
+	default:
+		return fmt.Sprintf("%.1fms", float64(d.Nanoseconds())/1e6)
 	}
 }

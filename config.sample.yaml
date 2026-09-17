@@ -79,6 +79,14 @@ general:
   #    url: "https://198.51.100.8:8443"
   #    token: "..."
 
+  # Expose Go's profiling endpoints under /debug/pprof on the web UI listener.
+  # Off by default. With it on:
+  #   go tool pprof http://host:port/debug/pprof/profile?seconds=30
+  # shows exactly which functions the CPU time goes to - the tool to reach for
+  # once /system reports the process is CPU-bound. Restrict the listener first:
+  # the profiles reveal internals and capturing one briefly costs CPU.
+  pprof: false
+
   # Optional historical dashboard at /dashboard. Periodically snapshots log state
   # into a local SQLite file and renders charts over 1h/12h/24h/3d/7d windows,
   # covering the common cases that would otherwise need Prometheus + Grafana.

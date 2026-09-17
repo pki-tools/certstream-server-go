@@ -11,183 +11,134 @@ import (
 	"github.com/d-Rickyy-b/certstream-server-go/internal/certificatetransparency"
 )
 
-var logStatusTmpl = template.Must(template.New("logstatus").Funcs(template.FuncMap{
-	"formatNumber": func(n uint64) string {
-		// Group digits with commas: 1234567 → 1,234,567
-		s := fmt.Sprintf("%d", n)
-		var b strings.Builder
-		offset := len(s) % 3
-		for i, c := range s {
-			if i > 0 && (i-offset)%3 == 0 {
-				b.WriteByte(',')
+func logStatusFuncs() template.FuncMap {
+	return template.FuncMap{
+		"formatNumber": func(n uint64) string {
+			// Group digits with commas: 1234567 → 1,234,567
+			s := fmt.Sprintf("%d", n)
+			var b strings.Builder
+			offset := len(s) % 3
+			for i, c := range s {
+				if i > 0 && (i-offset)%3 == 0 {
+					b.WriteByte(',')
+				}
+				b.WriteRune(c)
 			}
-			b.WriteRune(c)
-		}
-		return b.String()
-	},
-	"formatRate": func(r float64) string {
-		if r < 0.1 {
-			return fmt.Sprintf("%.2f", r)
-		}
-		if r < 10 {
-			return fmt.Sprintf("%.1f", r)
-		}
-		return fmt.Sprintf("%.0f", r)
-	},
-	"formatETA": func(eta time.Duration, behind uint64) string {
-		if eta == 0 {
-			return "Live"
-		}
-		if eta < 0 || behind == 0 {
-			return "—"
-		}
-		eta = eta.Round(time.Second)
-		h := int(eta.Hours())
-		m := int(math.Mod(eta.Minutes(), 60))
-		s := int(math.Mod(eta.Seconds(), 60))
-		switch {
-		case h > 0:
-			return fmt.Sprintf("%dh %dm", h, m)
-		case m > 0:
-			return fmt.Sprintf("%dm %ds", m, s)
-		default:
+			return b.String()
+		},
+		"formatRate": func(r float64) string {
+			if r < 0.1 {
+				return fmt.Sprintf("%.2f", r)
+			}
+			if r < 10 {
+				return fmt.Sprintf("%.1f", r)
+			}
+			return fmt.Sprintf("%.0f", r)
+		},
+		"formatETA": func(eta time.Duration, behind uint64) string {
+			if eta == 0 {
+				return "Live"
+			}
+			if eta < 0 || behind == 0 {
+				return "—"
+			}
+			eta = eta.Round(time.Second)
+			h := int(eta.Hours())
+			m := int(math.Mod(eta.Minutes(), 60))
+			s := int(math.Mod(eta.Seconds(), 60))
+			switch {
+			case h > 0:
+				return fmt.Sprintf("%dh %dm", h, m)
+			case m > 0:
+				return fmt.Sprintf("%dm %ds", m, s)
+			default:
+				return fmt.Sprintf("%ds", s)
+			}
+		},
+		"formatAge": func(d time.Duration) string {
+			if d < 0 {
+				return "Pending"
+			}
+			d = d.Round(time.Second)
+			if d < time.Minute {
+				return fmt.Sprintf("%ds ago", int(d.Seconds()))
+			}
+			if d < time.Hour {
+				return fmt.Sprintf("%dm ago", int(d.Minutes()))
+			}
+			return fmt.Sprintf("%dh ago", int(d.Hours()))
+		},
+		"etaClass": func(eta time.Duration) string {
+			if eta == 0 {
+				return "eta-live"
+			}
+			if eta < 0 {
+				return "eta-unknown"
+			}
+			if eta < 10*time.Minute {
+				return "eta-good"
+			}
+			if eta < time.Hour {
+				return "eta-warn"
+			}
+			return "eta-bad"
+		},
+		"behindClass": func(behind uint64) string {
+			if behind == 0 {
+				return "status-live"
+			}
+			if behind < 10_000 {
+				return "status-slight"
+			}
+			return "status-behind"
+		},
+		"typeClass": func(t string) string {
+			if t == "Tiled" {
+				return "badge-tiled"
+			}
+			return "badge-regular"
+		},
+		"catchupRemaining": func(until time.Time) string {
+			if until.IsZero() {
+				return ""
+			}
+			d := time.Until(until).Round(time.Second)
+			if d <= 0 {
+				return ""
+			}
+			m := int(d.Minutes())
+			s := int(d.Seconds()) % 60
+			if m > 0 {
+				return fmt.Sprintf("%dm %ds", m, s)
+			}
 			return fmt.Sprintf("%ds", s)
-		}
-	},
-	"formatAge": func(d time.Duration) string {
-		if d < 0 {
-			return "Pending"
-		}
-		d = d.Round(time.Second)
-		if d < time.Minute {
-			return fmt.Sprintf("%ds ago", int(d.Seconds()))
-		}
-		if d < time.Hour {
-			return fmt.Sprintf("%dm ago", int(d.Minutes()))
-		}
-		return fmt.Sprintf("%dh ago", int(d.Hours()))
-	},
-	"etaClass": func(eta time.Duration) string {
-		if eta == 0 {
-			return "eta-live"
-		}
-		if eta < 0 {
-			return "eta-unknown"
-		}
-		if eta < 10*time.Minute {
-			return "eta-good"
-		}
-		if eta < time.Hour {
-			return "eta-warn"
-		}
-		return "eta-bad"
-	},
-	"behindClass": func(behind uint64) string {
-		if behind == 0 {
-			return "status-live"
-		}
-		if behind < 10_000 {
-			return "status-slight"
-		}
-		return "status-behind"
-	},
-	"typeClass": func(t string) string {
-		if t == "Tiled" {
-			return "badge-tiled"
-		}
-		return "badge-regular"
-	},
-	"catchupRemaining": func(until time.Time) string {
-		if until.IsZero() {
-			return ""
-		}
-		d := time.Until(until).Round(time.Second)
-		if d <= 0 {
-			return ""
-		}
-		m := int(d.Minutes())
-		s := int(d.Seconds()) % 60
-		if m > 0 {
-			return fmt.Sprintf("%dm %ds", m, s)
-		}
-		return fmt.Sprintf("%ds", s)
-	},
-	"isCatchupActive": func(until time.Time) bool {
-		return !until.IsZero() && time.Now().Before(until)
-	},
-	// Sort keys mirror the display logic above so the ordering matches what the
-	// cell actually shows: 0 is live, -1 is unknown, otherwise seconds.
-	"etaSort": func(eta time.Duration, behind uint64) int64 {
-		if eta == 0 {
-			return 0
-		}
-		if eta < 0 || behind == 0 {
-			return -1
-		}
-		return int64(eta.Seconds())
-	},
-	"ageSort": func(d time.Duration) int64 {
-		if d < 0 {
-			return -1
-		}
-		return int64(d.Seconds())
-	},
-}).Parse(`<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta http-equiv="refresh" content="120">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CT Log Status</title>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f0f2f5;color:#1a1a1a;padding:24px 32px;min-height:100vh}
-h1{font-size:1.375rem;font-weight:700;margin-bottom:4px;letter-spacing:-0.01em}
-.meta{font-size:0.8125rem;color:#6b7280;margin-bottom:20px}
-.meta strong{color:#374151}
-.wrap{overflow-x:auto;border-radius:10px;box-shadow:0 1px 4px rgba(0,0,0,.12),0 0 0 1px rgba(0,0,0,.05)}
-table{width:100%;border-collapse:collapse;background:#fff;font-size:0.8125rem}
-thead tr{background:#1e293b}
-th{padding:10px 14px;text-align:left;color:#cbd5e1;font-weight:600;font-size:0.6875rem;text-transform:uppercase;letter-spacing:.06em;white-space:nowrap}
-td{padding:9px 14px;border-bottom:1px solid #f1f5f9;vertical-align:middle;white-space:nowrap}
-tbody tr:last-child td{border-bottom:none}
-tbody tr:hover td{background:#f8fafc}
-.num{font-variant-numeric:tabular-nums;font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:0.8rem}
-.badge{display:inline-block;padding:2px 9px;border-radius:99px;font-size:0.6875rem;font-weight:600;letter-spacing:.02em}
-.badge-regular{background:#dbeafe;color:#1d4ed8}
-.badge-tiled{background:#ede9fe;color:#6d28d9}
-.badge-catchup{background:#fef9c3;color:#854d0e}
-.badge-proxy{background:#e0f2fe;color:#075985}
-.eta-live{color:#15803d;font-weight:700}
-.eta-good{color:#16a34a}
-.eta-warn{color:#d97706}
-.eta-bad{color:#dc2626;font-weight:600}
-.eta-unknown{color:#9ca3af}
-.status-live{color:#15803d}
-.status-slight{color:#d97706}
-.status-behind{color:#dc2626}
-.age{color:#9ca3af}
-th.sortable{cursor:pointer;user-select:none;position:relative;padding-right:22px}
-th.sortable:hover{color:#fff;background:#273549}
-th.sortable i{position:absolute;right:7px;top:50%;transform:translateY(-50%);font-style:normal;font-size:0.65rem;opacity:.3}
-th.sortable i::after{content:"\2195"}
-th.sortable.sort-asc i{opacity:1}
-th.sortable.sort-asc i::after{content:"\25B2"}
-th.sortable.sort-desc i{opacity:1}
-th.sortable.sort-desc i::after{content:"\25BC"}
-button.catchup-btn{border:none;background:#3b82f6;color:#fff;font-size:0.6875rem;font-weight:600;padding:3px 10px;border-radius:6px;cursor:pointer;white-space:nowrap}
-button.catchup-btn:hover{background:#2563eb}
-button.catchup-btn:disabled{background:#93c5fd;cursor:default}
-</style>
-</head>
-<body>
-<h1>CT Log Status</h1>
-<p class="meta">
-  Generated at <strong>{{.GeneratedAt}}</strong> &nbsp;·&nbsp;
-  <strong>{{.TotalLogs}}</strong> logs monitored &nbsp;·&nbsp;
-  Tree sizes refresh every 3 min &nbsp;·&nbsp; Page auto-refreshes every 2 min
-</p>
-<div class="wrap">
+		},
+		"isCatchupActive": func(until time.Time) bool {
+			return !until.IsZero() && time.Now().Before(until)
+		},
+		// Sort keys mirror the display logic above so the ordering matches what the
+		// cell actually shows: 0 is live, -1 is unknown, otherwise seconds.
+		"etaSort": func(eta time.Duration, behind uint64) int64 {
+			if eta == 0 {
+				return 0
+			}
+			if eta < 0 || behind == 0 {
+				return -1
+			}
+			return int64(eta.Seconds())
+		},
+		"ageSort": func(d time.Duration) int64 {
+			if d < 0 {
+				return -1
+			}
+			return int64(d.Seconds())
+		},
+	}
+}
+
+// logStatusTableMarkup is the sortable table on its own, shared by /log-status
+// and the combined /overview page.
+const logStatusTableMarkup = `<div class="wrap">
 <table id="logtable">
 <thead>
 <tr>
@@ -224,8 +175,21 @@ button.catchup-btn:disabled{background:#93c5fd;cursor:default}
 {{end}}
 </tbody>
 </table>
-</div>
-<script>
+</div>`
+
+const logStatusPageHeader = `
+<h1>CT Log Status</h1>
+<p class="meta">
+  Generated at <strong>{{.GeneratedAt}}</strong> &nbsp;·&nbsp;
+  <strong>{{.TotalLogs}}</strong> logs monitored &nbsp;·&nbsp;
+  Tree sizes refresh every 3 min &nbsp;·&nbsp; Page auto-refreshes every 2 min
+</p>
+`
+
+// logStatusSortJS drives the sortable headers. logStatusCatchupJS is separate
+// because /overview embeds the table and its sorting but reuses the same
+// catch-up handler alongside it.
+const logStatusSortJS = `
 var SORT_KEY = 'ctLogStatusSort';
 
 function cellValue(row, col) {
@@ -297,7 +261,9 @@ document.querySelectorAll('#logtable th.sortable').forEach(function (th) {
   sortBy(col, dir);
 })();
 
-function triggerCatchup(btn, url) {
+`
+
+const logStatusCatchupJS = `function triggerCatchup(btn, url) {
   btn.disabled = true;
   btn.textContent = 'Sending…';
   fetch('/log-status/catchup', {
@@ -316,9 +282,67 @@ function triggerCatchup(btn, url) {
     btn.textContent = 'Catch Up';
   });
 }
-</script>
-</body>
+`
+
+// logStatusSectionCSS styles this page, shared with the combined /overview page.
+const logStatusSectionCSS = `
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f0f2f5;color:#1a1a1a;padding:24px 32px;min-height:100vh}
+h1{font-size:1.375rem;font-weight:700;margin-bottom:4px;letter-spacing:-0.01em}
+.meta{font-size:0.8125rem;color:#6b7280;margin-bottom:20px}
+.meta strong{color:#374151}
+.wrap{overflow-x:auto;border-radius:10px;box-shadow:0 1px 4px rgba(0,0,0,.12),0 0 0 1px rgba(0,0,0,.05)}
+table{width:100%;border-collapse:collapse;background:#fff;font-size:0.8125rem}
+thead tr{background:#1e293b}
+th{padding:10px 14px;text-align:left;color:#cbd5e1;font-weight:600;font-size:0.6875rem;text-transform:uppercase;letter-spacing:.06em;white-space:nowrap}
+td{padding:9px 14px;border-bottom:1px solid #f1f5f9;vertical-align:middle;white-space:nowrap}
+tbody tr:last-child td{border-bottom:none}
+tbody tr:hover td{background:#f8fafc}
+.num{font-variant-numeric:tabular-nums;font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:0.8rem}
+.badge{display:inline-block;padding:2px 9px;border-radius:99px;font-size:0.6875rem;font-weight:600;letter-spacing:.02em}
+.badge-regular{background:#dbeafe;color:#1d4ed8}
+.badge-tiled{background:#ede9fe;color:#6d28d9}
+.badge-catchup{background:#fef9c3;color:#854d0e}
+.badge-proxy{background:#e0f2fe;color:#075985}
+.eta-live{color:#15803d;font-weight:700}
+.eta-good{color:#16a34a}
+.eta-warn{color:#d97706}
+.eta-bad{color:#dc2626;font-weight:600}
+.eta-unknown{color:#9ca3af}
+.status-live{color:#15803d}
+.status-slight{color:#d97706}
+.status-behind{color:#dc2626}
+.age{color:#9ca3af}
+th.sortable{cursor:pointer;user-select:none;position:relative;padding-right:22px}
+th.sortable:hover{color:#fff;background:#273549}
+th.sortable i{position:absolute;right:7px;top:50%;transform:translateY(-50%);font-style:normal;font-size:0.65rem;opacity:.3}
+th.sortable i::after{content:"\2195"}
+th.sortable.sort-asc i{opacity:1}
+th.sortable.sort-asc i::after{content:"\25B2"}
+th.sortable.sort-desc i{opacity:1}
+th.sortable.sort-desc i::after{content:"\25BC"}
+button.catchup-btn{border:none;background:#3b82f6;color:#fff;font-size:0.6875rem;font-weight:600;padding:3px 10px;border-radius:6px;cursor:pointer;white-space:nowrap}
+button.catchup-btn:hover{background:#2563eb}
+button.catchup-btn:disabled{background:#93c5fd;cursor:default}
+`
+
+var logStatusTmpl = template.Must(template.New("logstatus").Funcs(logStatusFuncs()).
+	Parse(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="refresh" content="120">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CT Log Status</title>
+<style>` + logStatusSectionCSS + `</style>
+</head>
+<body>` + logStatusPageHeader + logStatusTableMarkup +
+		`<script>` + logStatusSortJS + logStatusCatchupJS + `</script>` + `</body>
 </html>`))
+
+// logStatusTableTmpl renders only the table, for embedding in /overview.
+var logStatusTableTmpl = template.Must(template.New("logstatus-table").
+	Funcs(logStatusFuncs()).Parse(logStatusTableMarkup))
 
 type logStatusPageData struct {
 	GeneratedAt string
@@ -355,7 +379,10 @@ func catchupHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func logStatusHandler(w http.ResponseWriter, _ *http.Request) {
+// buildLogStatusPageData gathers everything the page renders, split out so the
+// combined /overview page can reuse it.
+func buildLogStatusPageData() logStatusPageData {
+
 	logs := certificatetransparency.GetLogStatuses()
 
 	data := logStatusPageData{
@@ -363,6 +390,12 @@ func logStatusHandler(w http.ResponseWriter, _ *http.Request) {
 		TotalLogs:   len(logs),
 		Logs:        logs,
 	}
+
+	return data
+}
+
+func logStatusHandler(w http.ResponseWriter, _ *http.Request) {
+	data := buildLogStatusPageData()
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := logStatusTmpl.Execute(w, data); err != nil {
