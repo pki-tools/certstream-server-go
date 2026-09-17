@@ -8,7 +8,7 @@ builds:
   - id: certstream-server-go
     main: ./cmd/certstream-server-go
     binary: certstream-server-go
-    ldflags: -s -w -X github.com/pki-tools/certstream-server-go/internal/config.Version={{.Version}}
+    ldflags: -s -w -X github.com/d-Rickyy-b/certstream-server-go/internal/config.Version={{.Version}}
     env:
       - CGO_ENABLED=0
     goos:
@@ -116,7 +116,7 @@ docker_manifests:
 
 archives:
   - id: server
-    ids:
+    builds:
       - certstream-server-go
     format: binary
     name_template: >-
@@ -126,7 +126,7 @@ archives:
       {{- if eq .Arch "386" }}i386{{- else }}{{ .Arch }}{{ end }}
 
   - id: proxy
-    ids:
+    builds:
       - certstream-proxy
     format: binary
     name_template: >-
