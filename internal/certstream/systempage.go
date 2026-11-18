@@ -65,6 +65,10 @@ type systemPageData struct {
 	LogsMonitor  int
 	RateLimitHit int64
 	ErrorCounts  []categoryCount
+
+	ChainCacheRatio float64
+	ChainCacheSize  int
+	ChainCacheKnown bool
 }
 
 type categoryCount struct {
@@ -281,6 +285,11 @@ const systemSectionMarkup = `
     <div class="stat-value">{{num .RateLimitHit}}</div>
     <div class="stat-sub">429/503 from log operators</div>
   </div>
+  <div class="stat">
+    <div class="stat-label">Chain cache</div>
+    <div class="stat-value">{{if .ChainCacheKnown}}{{pct0 .ChainCacheRatio}}{{else}}—{{end}}</div>
+    <div class="stat-sub">issuer parses avoided · {{.ChainCacheSize}} cached</div>
+  </div>
 </div>
 `
 
@@ -409,6 +418,17 @@ func buildSystemPageData() systemPageData {
 	}
 
 	data.Processed = data.Certs + data.Precerts
+
+	// Issuer-chain cache effectiveness. Parsing a chain certificate costs about
+	// as much as parsing the leaf, so a high hit ratio is what keeps per-entry
+	// CPU down; a low one means entries are arriving with unusually varied
+	// chains and ingestion will be correspondingly more expensive.
+	if hits, misses, size := certificatetransparency.ChainCacheStats(); hits+misses > 0 {
+		// pct0 formats a 0-100 percentage, matching the other CPU figures.
+		data.ChainCacheRatio = 100 * float64(hits) / float64(hits+misses)
+		data.ChainCacheSize = size
+		data.ChainCacheKnown = true
+	}
 
 	if n := len(samples); n > 0 {
 		last := samples[n-1]

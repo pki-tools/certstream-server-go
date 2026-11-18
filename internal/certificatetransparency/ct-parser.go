@@ -109,6 +109,13 @@ func parseCertificateChain(logEntry *ct.LogEntry) ([]models.LeafCert, error) {
 	chain := make([]models.LeafCert, len(logEntry.Chain))
 
 	for i, chainEntry := range logEntry.Chain {
+		// Issuer certificates repeat across effectively every entry, and parsing
+		// them is the single largest per-entry cost. See chaincache.go.
+		if cached, ok := lookupChainCert(chainEntry.Data); ok {
+			chain[i] = cached
+			continue
+		}
+
 		myCert, parseErr := x509.ParseCertificate(chainEntry.Data)
 		if parseErr != nil {
 			log.Println("Error parsing certificate: ", parseErr)
@@ -116,6 +123,7 @@ func parseCertificateChain(logEntry *ct.LogEntry) ([]models.LeafCert, error) {
 		}
 
 		leafCert := leafCertFromX509cert(*myCert)
+		storeChainCert(chainEntry.Data, leafCert)
 		chain[i] = leafCert
 	}
 
@@ -217,7 +225,7 @@ func leafCertFromX509cert(cert x509.Certificate) models.LeafCert {
 	}
 
 	// Parse key type and size
-	leafCert.KeyType = parseKeyType(cert.PublicKeyAlgorithm, cert.RawSubjectPublicKeyInfo)
+	leafCert.KeyType = parseKeyType(cert.PublicKeyAlgorithm, cert.PublicKey, cert.RawSubjectPublicKeyInfo)
 
 	// Determine validation type (DV, OV, IV, EV)
 	leafCert.ValidationType = "OV" // default
@@ -381,36 +389,35 @@ func parseName(input []string) *string {
 }
 
 // parseKeyType determines the public key algorithm and calculates key size.
-func parseKeyType(keyAlg x509.PublicKeyAlgorithm, rawKey []byte) string {
+// pub is the already-decoded key from x509.ParseCertificate; rawKey is the
+// SubjectPublicKeyInfo DER, used only as a fallback when the certificate parser
+// did not produce a typed key. Re-parsing the SPKI unconditionally cost about
+// 10% of the per-entry CPU time for no new information.
+func parseKeyType(keyAlg x509.PublicKeyAlgorithm, pub any, rawKey []byte) string {
+	if pub == nil {
+		if parsed, err := x509.ParsePKIXPublicKey(rawKey); err == nil {
+			pub = parsed
+		}
+	}
+
 	switch keyAlg {
 	case 1: // RSA
-		rsaKey, err := x509.ParsePKIXPublicKey(rawKey)
-		if err == nil {
-			if rsaPub, ok := rsaKey.(*rsa.PublicKey); ok {
-				KeySize := rsaPub.N
-				keySizeBits := strconv.Itoa(KeySize.BitLen())
-				return "RSA" + keySizeBits
-			}
+		if rsaPub, ok := pub.(*rsa.PublicKey); ok {
+			return "RSA" + strconv.Itoa(rsaPub.N.BitLen())
 		}
+
 		return "RSA"
 	case 2: // DSA
-		dsaKey, err := x509.ParsePKIXPublicKey(rawKey)
-		if err == nil {
-			if dsaPub, ok := dsaKey.(*dsa.PublicKey); ok {
-				KeySize := dsaPub.P
-				keySizeBits := strconv.Itoa(KeySize.BitLen())
-				return "DSA" + keySizeBits
-			}
+		if dsaPub, ok := pub.(*dsa.PublicKey); ok {
+			return "DSA" + strconv.Itoa(dsaPub.P.BitLen())
 		}
+
 		return "DSA"
 	case 3: // ECDSA
-		ecdsaKey, err := x509.ParsePKIXPublicKey(rawKey)
-		if err == nil {
-			if ecdsaPub, ok := ecdsaKey.(*ecdsa.PublicKey); ok {
-				keySizeBits := strconv.Itoa(ecdsaPub.Curve.Params().BitSize)
-				return "ECDSA" + keySizeBits
-			}
+		if ecdsaPub, ok := pub.(*ecdsa.PublicKey); ok {
+			return "ECDSA" + strconv.Itoa(ecdsaPub.Curve.Params().BitSize)
 		}
+
 		return "ECDSA"
 	default:
 		return "Unknown"
