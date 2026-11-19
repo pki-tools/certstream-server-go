@@ -50,13 +50,27 @@ type rateLimitTransport struct {
 }
 
 func (t *rateLimitTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Captured before the call: the range asked for is what the response's entry
+	// count has to be compared against. See fetchstats.go.
+	requested := requestedEntries(req)
+
+	start := time.Now()
 	resp, err := t.base.RoundTrip(req)
+	latency := time.Since(start)
+
 	if err != nil || resp == nil {
 		return resp, err
 	}
 
 	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
 		recordRateLimit(t.logURL, t.logName, resp.StatusCode, resp.Header.Get("Retry-After"))
+	}
+
+	if requested > 0 && resp.StatusCode == http.StatusOK && resp.Body != nil {
+		logURL, logName := t.logURL, t.logName
+		resp.Body = newEntryCountingBody(resp.Body, func(returned int64) {
+			recordFetch(logURL, logName, requested, returned, latency)
+		})
 	}
 
 	return resp, err

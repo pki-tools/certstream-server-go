@@ -342,8 +342,15 @@ func validateConfig(config *Config) bool {
 		config.General.BufferSizes.CertChan = 2000
 	}
 
+	// 1000 is the maximum RFC 6962 get-entries range that operators accept, and
+	// it is certificate-transparency-go's own default. A log returns fewer
+	// entries than asked for whenever it wants to (section 4.6) and the fetcher
+	// re-requests the remainder, so asking for less than the operator would
+	// honour simply spends more requests for the same entries - and the limit
+	// operators enforce is on requests. The previous default of 256 cost up to
+	// four times the request budget on logs that serve full batches.
 	if config.General.Scanner.BatchSize <= 0 {
-		config.General.Scanner.BatchSize = 256
+		config.General.Scanner.BatchSize = 1000
 	}
 
 	if config.General.Scanner.ParallelFetch <= 0 {

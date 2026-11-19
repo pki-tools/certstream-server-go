@@ -69,6 +69,19 @@ type systemPageData struct {
 	ChainCacheRatio float64
 	ChainCacheSize  int
 	ChainCacheKnown bool
+
+	FetchStats []fetchView
+}
+
+// fetchView is one row of the fetch-efficiency table.
+type fetchView struct {
+	LogName            string
+	LogURL             string
+	EntriesPerResponse float64
+	FillPercent        float64
+	MaxReturn          int64
+	RequestsPerSec     float64
+	Latency            string
 }
 
 type categoryCount struct {
@@ -223,6 +236,45 @@ const systemSectionMarkup = `
     </table>
     {{else}}
     <p class="sub" style="margin:10px 0 0">No errors recorded.</p>
+    {{end}}
+  </div>
+
+  <div class="card">
+    <h2>Fetch efficiency</h2>
+    <p class="sub">
+      Entries actually returned per get-entries request. A log may return fewer
+      than <code>batch_size</code> asks for; the shortfall costs extra round
+      trips, not lost entries. Worst fill first.
+    </p>
+    {{if .FetchStats}}
+    <table>
+      <thead><tr>
+        <th>Log</th>
+        <th style="text-align:right">Entries/req</th>
+        <th style="text-align:right">Fill</th>
+        <th style="text-align:right">Best</th>
+        <th style="text-align:right">Req/s</th>
+        <th style="text-align:right">Latency</th>
+      </tr></thead>
+      <tbody>
+      {{range .FetchStats}}<tr>
+        <td title="{{.LogURL}}">{{.LogName}}</td>
+        <td class="n">{{f1 .EntriesPerResponse}}</td>
+        <td class="n">{{pct0 .FillPercent}}</td>
+        <td class="n">{{.MaxReturn}}</td>
+        <td class="n">{{f1 .RequestsPerSec}}</td>
+        <td class="n">{{.Latency}}</td>
+      </tr>{{end}}
+      </tbody>
+    </table>
+    <p class="sub" style="margin:10px 0 0">
+      Fill near 100% means <code>batch_size</code> is honoured and only
+      <code>parallel_fetch</code> can raise this log's rate. A low fill means
+      the operator caps responses, so each batch becomes several sequential
+      requests; raising <code>batch_size</code> further will not help.
+    </p>
+    {{else}}
+    <p class="sub" style="margin:10px 0 0">No get-entries requests recorded yet.</p>
     {{end}}
   </div>
 </div>
@@ -423,6 +475,31 @@ func buildSystemPageData() systemPageData {
 	// as much as parsing the leaf, so a high hit ratio is what keeps per-entry
 	// CPU down; a low one means entries are arriving with unusually varied
 	// chains and ingestion will be correspondingly more expensive.
+	// Fetch efficiency, worst fill first. Capped so one page stays readable;
+	// the worst offenders are the ones worth seeing.
+	const maxFetchRows = 15
+
+	for i, s := range certificatetransparency.GetFetchStats() {
+		if i >= maxFetchRows {
+			break
+		}
+
+		name := s.LogName
+		if name == "" {
+			name = s.LogURL
+		}
+
+		data.FetchStats = append(data.FetchStats, fetchView{
+			LogName:            name,
+			LogURL:             s.LogURL,
+			EntriesPerResponse: s.EntriesPerResponse,
+			FillPercent:        100 * s.FillRatio,
+			MaxReturn:          s.MaxReturn,
+			RequestsPerSec:     s.RequestsPerSec,
+			Latency:            s.AvgLatency.Round(time.Millisecond).String(),
+		})
+	}
+
 	if hits, misses, size := certificatetransparency.ChainCacheStats(); hits+misses > 0 {
 		// pct0 formats a 0-100 percentage, matching the other CPU figures.
 		data.ChainCacheRatio = 100 * float64(hits) / float64(hits+misses)

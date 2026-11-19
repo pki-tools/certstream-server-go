@@ -118,7 +118,7 @@ general:
     certchan: 1000          # internal worker→broadcaster pipeline depth (entries)
 
   scanner:
-    batch_size: 256         # entries per HTTP request for regular logs (max 1000)
+    batch_size: 1000        # entries requested per HTTP request for regular logs (max 1000)
     parallel_fetch: 1       # concurrent fetches per regular log (>3 risks rate-limiting)
     num_workers: 1          # parsing goroutines per regular log
     tiled_batch_size: 500   # max entries per 30s tick for tiled logs
@@ -360,7 +360,7 @@ Reading the verdict:
 | **Backfilling from index 0** | Logs with no saved index are downloading their entire history. Indistinguishable from falling behind on `/log-status`, but it is a cold start working through a fixed backlog | Expected after deleting `ct_index.json` or when a new log shard appears. Set `recovery.start_at_head: true` to start these live instead |
 | **Rate limiting detected** | The operator is throttling you | **Lower** `parallel_fetch` for those logs. Raising it — or hitting Catch Up — earns more throttling and makes the backlog worse |
 | **Pipeline is backed up** | Fetching outpaces processing; the entry channel is over half full | Bottleneck is downstream (CPU, JSON encoding, slow WebSocket clients). More connections will not help. Raise `buffer_sizes.certchan`, check CPU headroom |
-| **Keeping up, no throttling** | Neither limit is being hit | Fetch rate is simply too low. Raise `scanner.batch_size` toward 1000 and `parallel_fetch` to 2–3, then re-check this page for throttling |
+| **Keeping up, no throttling** | Neither limit is being hit | Fetch rate is simply too low. Check **Fetch efficiency** on `/system`: if fill is near 100% the only fetch-side lever is `parallel_fetch` (try 2–3, then re-check for throttling); if fill is low the operator is capping responses and `batch_size` cannot help |
 
 ### Tiled logs: 404 on a tile
 
@@ -370,7 +370,21 @@ The client library retries 429 and 5xx internally but treats any other non-200 a
 
 These are now recognised, logged under the `tile` category (throttled to one note per log per five minutes so they cannot flood the window), and retried on the next poll with progress kept. Occasional entries are normal and harmless. A log producing them continuously while its **Behind** count does not fall is a genuine problem worth raising with the operator.
 
-Note that `batch_size` cannot exceed 1000 for regular logs — RFC 6962 §4.6 caps `get-entries` server-side, so requesting more returns at most 1000 anyway.
+### What `batch_size` actually controls
+
+`batch_size` maps one-to-one onto the wire. The fetcher splits the outstanding range into chunks of `batch_size`, and each chunk becomes exactly one `GET /ct/v1/get-entries?start=X&end=Y` with `end = X + batch_size - 1` (the range is inclusive).
+
+It cannot exceed 1000 for regular logs — RFC 6962 §4.6 caps `get-entries` server-side, so requesting more returns at most 1000 anyway.
+
+The part that matters for throughput is that a log **may return fewer entries than requested**, and many do. Nothing is lost: the fetch worker re-requests the remainder in place, advancing by however many entries actually arrived. The shortfall is paid in round trips instead. A log that caps responses at 32 entries turns one nominal 1000-entry batch into roughly 32 sequential requests on that one worker.
+
+This has a concrete consequence for tuning:
+
+- The number of requests **in flight** equals `parallel_fetch`, whatever `batch_size` is. Raising `batch_size` above what the operator honours changes nothing on the wire.
+- Setting it **below** what the operator honours is actively harmful — it spends several requests where one would have done, and the limit operators enforce is on requests, not entries. This is why the default is now 1000 rather than 256.
+- For a log whose fill is already near 100%, `parallel_fetch` is the only remaining fetch-side lever.
+
+The **Fetch efficiency** table on `/system` shows the observed entries-per-response, fill percentage and best single response per log, measured at the HTTP transport, so the operator's real cap is a reading rather than a guess.
 
 The instrumented transport also raises the idle connection pool to 20 per host. Go's default is 2, so with `parallel_fetch` above 2 the surplus connections were previously torn down and re-handshaked on every batch.
 
@@ -624,7 +638,7 @@ These settings control how aggressively the server fetches entries from CT logs.
 
 | Config key | Default | What it controls |
 |---|---|---|
-| `scanner.batch_size` | `256` | Entries fetched per HTTP `get-entries` request for regular (RFC 6962) logs. The CT spec allows up to **1000**. A larger value means fewer round-trips during catch-up. |
+| `scanner.batch_size` | `1000` | Entries requested per HTTP `get-entries` request for regular (RFC 6962) logs; this is the spec maximum. Logs may return fewer, in which case the remainder is re-requested — see [What `batch_size` actually controls](#what-batch_size-actually-controls). |
 | `scanner.parallel_fetch` | `1` | Concurrent `get-entries` requests per regular log. Increasing to `2` roughly doubles catch-up throughput; values above `3` risk 429 rate-limiting from log operators. |
 | `scanner.num_workers` | `1` | Certificate parsing goroutines per regular log. Rarely the bottleneck — network is. |
 | `scanner.tiled_batch_size` | `500` | Maximum entries processed per 30-second polling tick for tiled (sunlight) logs. Caps catch-up speed to prevent memory spikes from a single tiled log flooding the pipeline. |

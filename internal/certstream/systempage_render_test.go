@@ -37,6 +37,41 @@ func TestSystemPageRendersChainCache(t *testing.T) {
 	}
 }
 
+// TestSystemPageRendersFetchEfficiency renders the fetch table with a log that
+// returns 32 of 1000 requested entries. Template errors in the new rows are
+// only visible from a real render, since the 200 is written before execution.
+func TestSystemPageRendersFetchEfficiency(t *testing.T) {
+	certificatetransparency.SeedFetchStatsForTest("https://ct.example.com/log", "capped-log", 1000, 32)
+
+	rec := httptest.NewRecorder()
+	systemHandler(rec, httptest.NewRequest(http.MethodGet, "/system", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	body := rec.Body.String()
+	for _, want := range []string{"Fetch efficiency", "capped-log", "32.0", "3%"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("rendered page missing %q\nsection:\n%s", want, section(body, "Fetch efficiency"))
+		}
+	}
+}
+
+func section(body, heading string) string {
+	i := strings.Index(body, heading)
+	if i < 0 {
+		return "(section not found)"
+	}
+
+	end := i + 900
+	if end > len(body) {
+		end = len(body)
+	}
+
+	return body[i:end]
+}
+
 func extractTile(body string) string {
 	i := strings.Index(body, "Chain cache")
 	if i < 0 {
