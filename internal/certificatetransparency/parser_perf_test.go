@@ -17,6 +17,7 @@ import (
 	"github.com/d-Rickyy-b/certstream-server-go/internal/models"
 
 	ct "github.com/google/certificate-transparency-go"
+	ctx509 "github.com/google/certificate-transparency-go/x509"
 )
 
 func makeDER(tb testing.TB, cn string, sans []string, isCA bool) []byte {
@@ -257,4 +258,84 @@ func makeRSADER(tb testing.TB, cn string) []byte {
 	}
 
 	return der
+}
+
+// BenchmarkChainVsLeaf records why chain parsing is no longer worth skipping.
+//
+// The chain array and the leaf's base64 DER are present only in /full-stream
+// output; JSONLite and JSONDomains discard both. That makes "skip the chain
+// when no full-stream client is connected" an obvious-looking optimisation.
+// It is not: with the issuer cache warm, the two variants below measure the
+// same within noise, because a cache hit costs a map lookup rather than a
+// parse. Skipping the chain would trade a behaviour caveat (entries already in
+// the pipeline when a full-stream client connects would arrive without a
+// chain) for no measurable gain.
+func BenchmarkChainVsLeaf(b *testing.B) {
+	leaf := makeDER(b, "www.example.com", []string{"www.example.com", "example.com", "cdn.example.com"}, false)
+	inter := makeDER(b, "Example Intermediate CA", nil, true)
+	root := makeDER(b, "Example Root CA", nil, true)
+
+	withChain := makeEntry(leaf, inter, root)
+	noChain := makeEntry(leaf)
+
+	// Warm the issuer cache: the steady state is what matters, not first parse.
+	if _, err := parseData(withChain, "Op", "log", "https://ct.example.com/log"); err != nil {
+		b.Fatal(err)
+	}
+
+	b.Run("with_chain", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			if _, err := parseData(withChain, "Op", "log", "https://ct.example.com/log"); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+
+	b.Run("leaf_only", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			if _, err := parseData(noChain, "Op", "log", "https://ct.example.com/log"); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
+// BenchmarkParserComparison measures the remaining headroom in the parsing
+// path, which is the leaf parse itself.
+//
+// certificate-transparency-go carries a fork of encoding/asn1 that decodes via
+// reflection; the standard library uses cryptobyte. On identical DER the
+// standard library is ~3.3x faster (5.3 us vs 17.5 us), which is the largest
+// single cost left in the pipeline.
+//
+// It is not a drop-in replacement, which is why this is a benchmark and not a
+// change:
+//   - Precertificates are parsed from Precert.TBSCertificate, a bare
+//     TBSCertificate with the poison extension stripped. Only ct-go can parse
+//     that (x509.ParseTBSCertificate); the standard library has no equivalent.
+//   - ct-go's x509 fork is deliberately lenient. CT logs legitimately contain
+//     certificates that the standard library rejects, so switching risks
+//     silently dropping entries rather than merely parsing them faster.
+//
+// A hybrid (standard library first for X509 entries, ct-go on error, ct-go
+// always for precerts) would capture the win for roughly the non-precert half
+// of entries at the cost of maintaining two conversion paths.
+func BenchmarkParserComparison(b *testing.B) {
+	der := makeDER(b, "www.example.com", []string{"www.example.com", "example.com", "cdn.example.com"}, false)
+
+	b.Run("ctgo_x509", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			if _, err := ctx509.ParseCertificate(der); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+
+	b.Run("stdlib_x509", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			if _, err := x509.ParseCertificate(der); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
 }
