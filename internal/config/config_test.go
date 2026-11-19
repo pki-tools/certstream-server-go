@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"runtime"
+	"testing"
+)
 
 func validBase() *Config {
 	var c Config
@@ -75,5 +78,35 @@ func TestUIListenerDisabledByDefault(t *testing.T) {
 
 	if c.Webserver.UI.Enabled {
 		t.Error("UI listener must stay off unless explicitly enabled")
+	}
+}
+
+// TestDefaultNumWorkersScalesWithCores pins the default that replaced a
+// hardcoded 1: parsing parallelism is per log, so a single value of 1 left a
+// backlogged log unable to use more than one core.
+func TestDefaultNumWorkersScalesWithCores(t *testing.T) {
+	got := defaultNumWorkers()
+
+	cores := runtime.GOMAXPROCS(0)
+	want := cores
+
+	if want > 4 {
+		want = 4
+	}
+
+	if want < 1 {
+		want = 1
+	}
+
+	if got != want {
+		t.Errorf("defaultNumWorkers() = %d, want %d (GOMAXPROCS=%d, capped at 4)", got, want, cores)
+	}
+
+	if got < 1 {
+		t.Errorf("defaultNumWorkers() = %d, must be at least 1", got)
+	}
+
+	if got > 4 {
+		t.Errorf("defaultNumWorkers() = %d, must be capped at 4", got)
 	}
 }

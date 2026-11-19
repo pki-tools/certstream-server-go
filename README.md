@@ -120,7 +120,7 @@ general:
   scanner:
     batch_size: 1000        # entries requested per HTTP request for regular logs (max 1000)
     parallel_fetch: 1       # concurrent fetches per regular log (>3 risks rate-limiting)
-    num_workers: 1          # parsing goroutines per regular log
+    num_workers: 2          # parsing goroutines per regular log (default: cores, max 4)
     tiled_batch_size: 500   # max entries per 30s tick for tiled logs
 
   recovery:
@@ -382,6 +382,24 @@ The partial-tile case is not a fault and is no longer treated as one. In steady 
 The worker now stops short of the trailing partial tile and waits for the tree to grow, at which point those entries arrive inside a full tile. This removes the 404s and one wasted request per log per poll. A log whose tree has been static for 15 minutes does request the partial tile anyway, so a slow or retired log's final entries are not stranded.
 
 Note that while waiting in this state the checkpoint must still be refreshed: the condition for refreshing is "no full tile left to read", not "nothing left to read". Gating it on the latter would leave a log whose last tile is partial never fetching another checkpoint — the tree would appear frozen and the log would stall at that index.
+
+### Only one core is busy
+
+A process pegged at 100% of a single core while the rest of the machine idles is almost always `num_workers`, not the Go runtime.
+
+The runtime needs no help: `GOMAXPROCS` is never set in this codebase, so it defaults to the number of visible CPUs and the scheduler will happily use all of them. What limits parsing is that **`num_workers` is per log**. The scanner starts that many matcher goroutines for each log, all consuming one shared channel, and the parsing callbacks run there. So:
+
+- Total parsing parallelism is `num_workers` × *the number of logs currently behind*, not × the number of configured logs — a caught-up log's workers are blocked on an empty channel and consume nothing.
+- With `num_workers: 1` and one backlogged log, the entire parsing workload is a single goroutine, which is one core. The second core has nothing to run.
+
+This is why the default is now one worker per schedulable core (capped at 4) rather than 1. Unlike `parallel_fetch`, raising it issues no extra HTTP requests and so cannot attract rate limiting — it is purely local parallelism and safe to tune.
+
+Two things to check on `/system` before reaching for it:
+
+- **Parallelism tile** — shows `GOMAXPROCS / host CPUs`. If a cgroup quota is below `GOMAXPROCS` the page says so explicitly; Go only became cgroup-aware for `GOMAXPROCS` in 1.25 and this project targets 1.24, so in a container with a fractional CPU limit you should set `GOMAXPROCS` yourself to match.
+- **Bottleneck split** — if it reports *Broadcasting* or *Entry handling* rather than *Fetching*, more parsing workers will not help: the single `certHandler` goroutine downstream is the ceiling.
+
+One consequence worth knowing: with more than one worker per log, entries complete out of index order, so the recorded log position is a high-water mark rather than a contiguous one. A crash can lose entries below the mark that were still in flight. This is inherent to concurrent fetching and already applied with `parallel_fetch` above 1 — recovery is a resume hint, not a durable queue.
 
 ### What `batch_size` actually controls
 
@@ -653,7 +671,7 @@ These settings control how aggressively the server fetches entries from CT logs.
 |---|---|---|
 | `scanner.batch_size` | `1000` | Entries requested per HTTP `get-entries` request for regular (RFC 6962) logs; this is the spec maximum. Logs may return fewer, in which case the remainder is re-requested — see [What `batch_size` actually controls](#what-batch_size-actually-controls). |
 | `scanner.parallel_fetch` | `1` | Concurrent `get-entries` requests per regular log. Increasing to `2` roughly doubles catch-up throughput; values above `3` risk 429 rate-limiting from log operators. |
-| `scanner.num_workers` | `1` | Certificate parsing goroutines per regular log. Rarely the bottleneck — network is. |
+| `scanner.num_workers` | cores, capped at 4 | Certificate parsing goroutines **per log**. This is the only parallelism that applies to parsing, and it costs the operator nothing — it issues no extra requests, so unlike `parallel_fetch` it cannot attract rate limiting. See [Only one core is busy](#only-one-core-is-busy). |
 | `scanner.tiled_batch_size` | `500` | Maximum entries processed per 30-second polling tick for tiled (sunlight) logs. Caps catch-up speed to prevent memory spikes from a single tiled log flooding the pipeline. |
 
 **For faster catch-up** (if the server has been offline or is significantly behind):
@@ -662,7 +680,7 @@ These settings control how aggressively the server fetches entries from CT logs.
 scanner:
   batch_size: 1000
   parallel_fetch: 2
-  num_workers: 1
+  num_workers: 2
   tiled_batch_size: 2000
 ```
 
@@ -672,7 +690,7 @@ scanner:
 scanner:
   batch_size: 256
   parallel_fetch: 1
-  num_workers: 1
+  num_workers: 2
   tiled_batch_size: 500
 ```
 
@@ -774,7 +792,7 @@ With this set, `/log-status` and friends return 404 on the websocket port, and t
 
 When a log throttles by source address, or the host's egress bandwidth is the ceiling, fetching can be spread across additional IP addresses. `certstream-proxy` is a second binary in this repository, published alongside the server on every release.
 
-**It will not help if the constraint is CPU or parsing.** Check `/system` first: if the CPU tile is near 100% × cores, or raising `scanner.num_workers` changes throughput, the bottleneck is local and more egress addresses will do nothing.
+**It will not help if the constraint is CPU or parsing.** Check `/system` first: if the CPU tile is near 100% × cores, or raising `scanner.num_workers` changes throughput, the bottleneck is local and more egress addresses will do nothing. See [Only one core is busy](#only-one-core-is-busy).
 
 ### Running a proxy
 

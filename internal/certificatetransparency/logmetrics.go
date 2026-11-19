@@ -129,7 +129,23 @@ func (m *LogMetrics) Inc(operator, url string, index uint64) {
 
 	m.metrics[operator][url]++
 
-	m.index[url] = index
+	// Keep the high-water mark rather than the last value written.
+	//
+	// Entries do not complete in index order: the scanner runs num_workers
+	// matcher goroutines per log and the fetcher runs parallel_fetch workers on
+	// different ranges, so this is called with unordered indices. An
+	// unconditional assignment lets the recorded position move backwards, which
+	// persists a stale resume point in ct_index.json (re-broadcasting entries
+	// already sent after a restart) and suppresses the rate calculation in
+	// /log-status, which skips any cycle where the index appears to regress.
+	//
+	// This records "processed up to about here", not a contiguous watermark: a
+	// crash can still lose entries below the mark that were in flight. That is
+	// inherent to fetching ranges concurrently and already applied with
+	// parallel_fetch above 1; recovery is a resume hint, not a durable queue.
+	if cur, ok := m.index[url]; !ok || index > cur {
+		m.index[url] = index
+	}
 }
 
 // GetAllCTIndexes returns a copy of the internal CT index map.

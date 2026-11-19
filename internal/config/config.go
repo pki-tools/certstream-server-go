@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -196,6 +197,23 @@ func parseConfigFromBytes(data []byte) (*Config, error) {
 }
 
 // validateConfig validates the config values and sets defaults for missing values.
+// defaultNumWorkers returns the per-log parsing parallelism to use when none is
+// configured: one per schedulable core, capped at 4.
+func defaultNumWorkers() int {
+	const maxDefault = 4
+
+	n := runtime.GOMAXPROCS(0)
+	if n > maxDefault {
+		n = maxDefault
+	}
+
+	if n < 1 {
+		n = 1
+	}
+
+	return n
+}
+
 func validateConfig(config *Config) bool {
 	// Still matches invalid IP addresses but good enough for detecting completely wrong formats
 	URLPathRegex := regexp.MustCompile(`^(/[a-zA-Z0-9\-._]+)+$`)
@@ -357,8 +375,18 @@ func validateConfig(config *Config) bool {
 		config.General.Scanner.ParallelFetch = 1
 	}
 
+	// num_workers is per log, and it is the only parallelism that applies to
+	// parsing: the scanner runs this many matcher goroutines per log, all
+	// consuming one shared channel. With the previous default of 1, a single
+	// backlogged log could only ever use one core - the common case where the
+	// process sits at 100% of one core while the rest of the machine idles.
+	//
+	// Unlike parallel_fetch this costs the operator nothing: it issues no extra
+	// requests and so cannot attract rate limiting. Scaled to the cores Go is
+	// actually scheduling for, and capped because the value is per log and idle
+	// workers, while cheap, are not free.
 	if config.General.Scanner.NumWorkers <= 0 {
-		config.General.Scanner.NumWorkers = 1
+		config.General.Scanner.NumWorkers = defaultNumWorkers()
 	}
 
 	if config.General.Scanner.TiledBatchSize <= 0 {
