@@ -370,6 +370,19 @@ The client library retries 429 and 5xx internally but treats any other non-200 a
 
 These are now recognised, logged under the `tile` category (throttled to one note per log per five minutes so they cannot flood the window), and retried on the next poll with progress kept. Occasional entries are normal and harmless. A log producing them continuously while its **Behind** count does not fall is a genuine problem worth raising with the operator.
 
+**Two different conditions produce an identical-looking 404, and the path tells them apart:**
+
+| Path | Meaning |
+| --- | --- |
+| `tile/data/x456/118` | A **full** tile is missing — the log's checkpoint has outrun its own CDN. Transient, clears within seconds. |
+| `tile/0/x287/768`**`.p/124`** | A **partial** tile (`.p/<width>`) is missing — the log serves only full tiles. Permitted by the spec, and permanent. |
+
+The partial-tile case is not a fault and is no longer treated as one. In steady state a tiled log is drained up to its last full tile, leaving fewer than 256 entries in the trailing partial tile. `torchwood` skips that tile while a full one is available, but once the consumed index and the tree head fall inside the same tile it does request it — so a log that serves only full tiles answered 404 on every poll, forever, producing a continuous stream of notes about a log that was working perfectly.
+
+The worker now stops short of the trailing partial tile and waits for the tree to grow, at which point those entries arrive inside a full tile. This removes the 404s and one wasted request per log per poll. A log whose tree has been static for 15 minutes does request the partial tile anyway, so a slow or retired log's final entries are not stranded.
+
+Note that while waiting in this state the checkpoint must still be refreshed: the condition for refreshing is "no full tile left to read", not "nothing left to read". Gating it on the latter would leave a log whose last tile is partial never fetching another checkpoint — the tree would appear frozen and the log would stall at that index.
+
 ### What `batch_size` actually controls
 
 `batch_size` maps one-to-one onto the wire. The fetcher splits the outstanding range into chunks of `batch_size`, and each chunk becomes exactly one `GET /ct/v1/get-entries?start=X&end=Y` with `end = X + batch_size - 1` (the range is inclusive).

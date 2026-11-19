@@ -25,6 +25,18 @@ import (
 // batches back-to-back without waiting.
 const tiledPollInterval = 30 * time.Second
 
+// tileWidth is the number of entries in a full tile: 2^TileHeight with the
+// TileHeight of 8 fixed by c2sp.org/tlog-tiles. Defined here rather than
+// imported so this package does not take a direct dependency on torchwood for
+// one constant the spec pins.
+const tileWidth = 256
+
+// partialTileGrace is how long the tree must have been static before the
+// trailing partial tile is requested anyway. Long enough that an active log
+// never asks for one, short enough that a stalled log's last entries are not
+// held back for long.
+const partialTileGrace = 15 * time.Minute
+
 // tiledWorker processes a single tiled (Static CT API) log.
 type tiledWorker struct {
 	name          string
@@ -37,9 +49,12 @@ type tiledWorker struct {
 	// batches can be drained without re-fetching it each time.
 	tree     tlog.Tree
 	treeSize int64
-	mu       sync.Mutex
-	running  bool
-	cancel   context.CancelFunc
+	// treeGrewAt is when treeSize last increased, used to decide whether the
+	// trailing partial tile is worth requesting. See drainBatch.
+	treeGrewAt time.Time
+	mu         sync.Mutex
+	running    bool
+	cancel     context.CancelFunc
 }
 
 // startDownloadingCerts starts downloading certificates from the tiled CT log. This method is blocking.
@@ -120,6 +135,7 @@ func (tw *tiledWorker) runWorker(ctx context.Context) error {
 	// drained without asking for it again.
 	tw.tree = checkpoint.Tree
 	tw.treeSize = treeSize
+	tw.treeGrewAt = time.Now()
 
 	// If recovery is not enabled, start from the current tree size
 	recoveryEnabled := config.AppConfig.General.Recovery.Enabled
@@ -184,7 +200,14 @@ func (tw *tiledWorker) drainBatch(ctx context.Context, client *sunlight.Client) 
 	// Re-fetching one per batch would multiply checkpoint traffic on a log that
 	// is far behind, and would pull every tile request up against the moment a
 	// checkpoint is published, when its tiles may not have propagated yet.
-	if tw.treeSize <= tw.ctIndex {
+	//
+	// The condition is "no full tile left to read", not "nothing left to read".
+	// Since this worker deliberately stops short of the trailing partial tile
+	// (see below), waiting for treeSize to be fully consumed would mean never
+	// refreshing the checkpoint again on a log whose last tile is partial: the
+	// tree would appear frozen, treeGrewAt would never advance, and the log
+	// would stall at that index.
+	if !hasFullTileToRead(tw.ctIndex, tw.treeSize) {
 		checkpoint, _, cpErr := client.Checkpoint(ctx)
 		if cpErr != nil {
 			log.Printf("Could not get checkpoint for '%s': %s\n", tw.monitoringURL, cpErr)
@@ -195,10 +218,32 @@ func (tw *tiledWorker) drainBatch(ctx context.Context, client *sunlight.Client) 
 		}
 
 		tw.tree = checkpoint.Tree
+
+		if checkpoint.N > tw.treeSize {
+			tw.treeGrewAt = time.Now()
+		}
+
 		tw.treeSize = checkpoint.N
 	}
 
 	if tw.treeSize <= tw.ctIndex {
+		return true, nil
+	}
+
+	// Steady state on a tiled log: every full data tile has been drained and
+	// only the trailing partial tile is left.
+	//
+	// torchwood deliberately skips the trailing partial tile while there is a
+	// full tile to read, but once the consumed index and the tree size fall in
+	// the same tile it does request it (tlogclient.go: "if top-base == 0 { top
+	// = tree.N }"). Logs that do not serve partial tiles answer 404, every
+	// poll, indefinitely - which is what produced a continuous stream of
+	// "tile not published yet" notes.
+	//
+	// Those entries are not lost by waiting: they arrive as soon as the tile
+	// fills and becomes a full tile. So skip the request and wait for the tree
+	// to grow, which also removes one pointless HTTP request per log per poll.
+	if skipTrailingPartialTile(tw.ctIndex, tw.treeSize, tw.treeGrewAt, time.Now()) {
 		return true, nil
 	}
 
@@ -249,9 +294,16 @@ func (tw *tiledWorker) drainBatch(ctx context.Context, client *sunlight.Client) 
 			// Tearing the worker down would drop the client's tile cache and
 			// re-fetch the checkpoint over a condition that clears on its own,
 			// so keep any progress made and retry on the next tick instead.
+			note := "tile not published yet for the current checkpoint, retrying: " + iterErr.Error()
+			if isPartialTile(iterErr) {
+				// Permitted and permanent, not a fault: the log serves only full
+				// tiles. Say so, so this is not read as the log falling behind.
+				note = "log does not serve partial tiles; the trailing " +
+					"entries will arrive once the tile fills: " + iterErr.Error()
+			}
+
 			RecordErrorThrottled("tile404:"+tw.monitoringURL, tileNoteInterval,
-				tw.monitoringURL, tw.name, ErrCatTile,
-				"tile not published yet for the current checkpoint, retrying: "+iterErr.Error())
+				tw.monitoringURL, tw.name, ErrCatTile, note)
 
 			// Force a fresh checkpoint next time; the current one outran its data.
 			tw.treeSize = tw.ctIndex
@@ -295,6 +347,45 @@ func isTileNotYetPublished(err error) bool {
 	msg := err.Error()
 
 	return strings.Contains(msg, "unexpected status code 404") && strings.Contains(msg, "tile/")
+}
+
+// hasFullTileToRead reports whether at least one complete tile of unconsumed
+// entries is available. When it is false the only thing left is the trailing
+// partial tile, which both drives the checkpoint refresh above and the decision
+// in skipTrailingPartialTile below.
+func hasFullTileToRead(ctIndex, treeSize int64) bool {
+	return ctIndex/tileWidth != treeSize/tileWidth && treeSize > ctIndex
+}
+
+// skipTrailingPartialTile reports whether the only thing left to read is the
+// trailing partial tile, and the tree is still growing fast enough that waiting
+// for it to fill is better than requesting a tile the log may not serve.
+//
+// Returning false once the tree has been static for partialTileGrace is what
+// keeps a slow or retired log's final entries from being stranded forever.
+func skipTrailingPartialTile(ctIndex, treeSize int64, treeGrewAt, now time.Time) bool {
+	if hasFullTileToRead(ctIndex, treeSize) {
+		// torchwood will read the full tile and stop at the boundary without
+		// touching a partial tile.
+		return false
+	}
+
+	return now.Sub(treeGrewAt) < partialTileGrace
+}
+
+// isPartialTile reports whether a tile path refers to a partial tile, which
+// c2sp.org/tlog-tiles spells "<N>.p/<width>".
+//
+// This separates two conditions that produce an identical-looking 404. A full
+// tile 404 means the log's checkpoint has outrun its own CDN - transient, but
+// worth seeing. A partial tile 404 means the log simply does not serve partial
+// tiles, which is permitted and permanent, and says nothing is wrong.
+func isPartialTile(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	return strings.Contains(err.Error(), ".p/")
 }
 
 // parseTiledEntry converts a sunlight.LogEntry to a models.Entry.
