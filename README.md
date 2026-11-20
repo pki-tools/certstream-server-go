@@ -396,6 +396,7 @@ This is why the default is now one worker per schedulable core (capped at 4) rat
 
 Two things to check on `/system` before reaching for it:
 
+- **CPU used tile** — reads `99%` with `1.99 of 2.0 cores busy` underneath. The percentage is of the *whole* machine, so on a 2-core box a single saturated core is `50%`, not `100%`. If the core count is close to the available cores, parallelism is working and you are simply out of CPU.
 - **Parallelism tile** — shows `GOMAXPROCS / host CPUs`. If a cgroup quota is below `GOMAXPROCS` the page says so explicitly; Go only became cgroup-aware for `GOMAXPROCS` in 1.25 and this project targets 1.24, so in a container with a fractional CPU limit you should set `GOMAXPROCS` yourself to match.
 - **Bottleneck split** — if it reports *Broadcasting* or *Entry handling* rather than *Fetching*, more parsing workers will not help: the single `certHandler` goroutine downstream is the ceiling.
 

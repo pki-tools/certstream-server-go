@@ -39,7 +39,11 @@ type systemPageData struct {
 	Certs     int64
 	Precerts  int64
 
-	CPUPercent   float64
+	CPUPercent float64
+	// CoresUsed is CPUPercent expressed in cores, so the tile does not show two
+	// different percentages (one of the whole machine, one of a single core)
+	// side by side - which reads as a fault when it is not one.
+	CoresUsed    float64
 	GCPercent    float64
 	UserPercent  float64
 	Saturation   float64
@@ -94,6 +98,7 @@ func systemFuncs() template.FuncMap {
 		"pct":  func(v float64) string { return fmt.Sprintf("%.1f%%", v) },
 		"pct0": func(v float64) string { return fmt.Sprintf("%.0f%%", v) },
 		"f1":   func(v float64) string { return fmt.Sprintf("%.1f", v) },
+		"f2":   func(v float64) string { return fmt.Sprintf("%.2f", v) },
 		// Accepts any integer kind: the page mixes int, int64, uint32 and uint64, and
 		// a typed parameter would fail at execution time rather than compile time.
 		"num": func(v any) string {
@@ -289,7 +294,7 @@ const systemSectionMarkup = `
   <div class="stat">
     <div class="stat-label">CPU used</div>
     <div class="stat-value">{{if .CPUKnown}}{{pct0 .Saturation}}{{else}}—{{end}}</div>
-    <div class="stat-sub">{{if .CPUKnown}}of {{f1 .CPU.Limit}} available core{{if ne .CPU.Limit 1.0}}s{{end}} · {{pct0 .CPUPercent}} of one core{{else}}not reported on this platform{{end}}</div>
+    <div class="stat-sub">{{if .CPUKnown}}{{f2 .CoresUsed}} of {{f1 .CPU.Limit}} core{{if ne .CPU.Limit 1.0}}s{{end}} busy{{if .CPU.QuotaSource}} · {{.CPU.QuotaSource}} limit{{end}}{{else}}not reported on this platform{{end}}</div>
     {{if .CPUKnown}}{{spark .CPUSpark}}{{end}}
   </div>
   <div class="stat">
@@ -450,6 +455,7 @@ func buildSystemPageData() systemPageData {
 		Certs:       certificatetransparency.GetProcessedCerts(),
 		Precerts:    certificatetransparency.GetProcessedPrecerts(),
 		CPUPercent:  cpu,
+		CoresUsed:   cpu / 100,
 		GCPercent:   gc,
 		UserPercent: user,
 		Saturation:  capacity.Saturation(cpu),

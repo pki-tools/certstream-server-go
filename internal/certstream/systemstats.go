@@ -321,3 +321,11 @@ func cpuClassesOver(samples []statSample) (user, gc, scavenge float64) {
 		(last.GCSeconds - first.GCSeconds) / elapsed * 100,
 		(last.ScavengeSeconds - first.ScavengeSeconds) / elapsed * 100
 }
+
+// seedStatsForTest replaces the sample ring so page rendering can be exercised
+// with known CPU figures. Passing nil clears it. Test-only.
+func seedStatsForTest(samples []statSample) {
+	statsRing.mu.Lock()
+	statsRing.samples = samples
+	statsRing.mu.Unlock()
+}

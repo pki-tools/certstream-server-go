@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/d-Rickyy-b/certstream-server-go/internal/certificatetransparency"
 )
@@ -78,10 +79,58 @@ func extractTile(body string) string {
 		return "(tile not found)"
 	}
 
-	end := i + 300
+	end := i + 400
 	if end > len(body) {
 		end = len(body)
 	}
 
 	return body[i:end]
+}
+
+// TestSystemPageCPUTileReadsInCores guards the wording that caused a real
+// misreading. The tile showed "99% of 2.0 available cores · 199% of one core":
+// two percentages on different bases side by side, which reads as a fault when
+// both cores being busy is in fact the goal.
+//
+// Samples are seeded so the tile actually renders - with none, it says
+// "not reported on this platform" and asserting on it proves nothing.
+func TestSystemPageCPUTileReadsInCores(t *testing.T) {
+	// 2.0 CPU-seconds consumed over 1.0 second of wall clock = 2 cores busy.
+	seedStatsForTest([]statSample{
+		{At: time.Now().Add(-time.Second), CPUSeconds: 10, Processed: 1000},
+		{At: time.Now(), CPUSeconds: 12, Processed: 3000},
+	})
+	defer seedStatsForTest(nil)
+
+	rec := httptest.NewRecorder()
+	systemHandler(rec, httptest.NewRequest(http.MethodGet, "/system", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	body := rec.Body.String()
+
+	tile := section(body, "CPU used")
+	if tile == "(section not found)" {
+		t.Fatal("CPU tile missing")
+	}
+
+	if strings.Contains(tile, "not reported") {
+		t.Fatalf("seeded samples did not reach the tile:\n%s", tile)
+	}
+
+	// The old second percentage must be gone from the tile itself.
+	if strings.Contains(tile, "of one core") {
+		t.Errorf("CPU tile still shows a percentage of one core:\n%s", tile)
+	}
+
+	// 2.00 cores busy, expressed in cores rather than as 200%%.
+	if !strings.Contains(tile, "2.00 of") {
+		t.Errorf("CPU tile should report cores busy as a core count:\n%s", tile)
+	}
+
+	if !strings.Contains(tile, "busy") {
+		t.Errorf("CPU tile should say what the figure means:\n%s", tile)
+	}
 }
