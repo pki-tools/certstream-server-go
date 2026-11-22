@@ -10,12 +10,17 @@ import (
 
 // runCertHandler feeds entries through the real certHandler and returns how much
 // time it attributed to each stage.
-func runCertHandler(t *testing.T, broadcastCap int, feed func(chan<- models.Entry)) PipelineTiming {
+//
+// The broadcast channel is created and installed by the caller, before any
+// goroutine starts. Installing it in here raced with a caller's draining
+// goroutine, which could read the global before the assignment and drain the
+// previous test's channel instead.
+func runCertHandler(t *testing.T, broadcast chan models.Entry, feed func(chan<- models.Entry)) PipelineTiming {
 	t.Helper()
 
 	before := GetPipelineTiming()
 
-	web.ClientHandler.Broadcast = make(chan models.Entry, broadcastCap)
+	web.ClientHandler.Broadcast = broadcast
 	entryChan := make(chan models.Entry, 8)
 
 	done := make(chan struct{})
@@ -47,7 +52,7 @@ func runCertHandler(t *testing.T, broadcastCap int, feed func(chan<- models.Entr
 // slowly and the downstream channel has room, so nearly all the time is spent
 // waiting for input.
 func TestCertHandlerAttributesInputWait(t *testing.T) {
-	got := runCertHandler(t, 64, func(ch chan<- models.Entry) {
+	got := runCertHandler(t, make(chan models.Entry, 64), func(ch chan<- models.Entry) {
 		for i := 0; i < 3; i++ {
 			time.Sleep(20 * time.Millisecond)
 			ch <- models.Entry{}
@@ -74,9 +79,11 @@ func TestCertHandlerAttributesOutputWait(t *testing.T) {
 	// reader below frees a slot.
 	var got PipelineTiming
 
+	broadcast := make(chan models.Entry, 1)
+
 	done := make(chan struct{})
 	go func() {
-		got = runCertHandler(t, 1, func(ch chan<- models.Entry) {
+		got = runCertHandler(t, broadcast, func(ch chan<- models.Entry) {
 			for i := 0; i < 3; i++ {
 				ch <- models.Entry{}
 			}
@@ -88,7 +95,7 @@ func TestCertHandlerAttributesOutputWait(t *testing.T) {
 	go func() {
 		for i := 0; i < 3; i++ {
 			time.Sleep(25 * time.Millisecond)
-			<-web.ClientHandler.Broadcast
+			<-broadcast
 		}
 	}()
 

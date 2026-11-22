@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -341,10 +342,28 @@ func NewWebsocketServer(networkIf string, port int, certPath, keyPath string) *W
 	setupWebsocketRoutes(server.routes)
 	server.initServer()
 
-	ClientHandler.Broadcast = make(chan models.Entry, config.AppConfig.General.BufferSizes.BroadcastManager)
-	go ClientHandler.broadcaster()
+	startBroadcaster()
 
 	return server
+}
+
+// broadcasterOnce guards the process-wide broadcast channel and its goroutine.
+var broadcasterOnce sync.Once
+
+// startBroadcaster creates ClientHandler's broadcast channel and starts its
+// dispatch goroutine, exactly once per process.
+//
+// ClientHandler is a package-level singleton, but this used to run on every
+// NewWebsocketServer call: each call replaced ClientHandler.Broadcast - a data
+// race with the broadcaster already reading that field, and with certHandler
+// sending on it - and started another broadcaster that was never stopped. A
+// process builds one server, so this was latent in production, but it is what
+// the race detector caught in tests that build several.
+func startBroadcaster() {
+	broadcasterOnce.Do(func() {
+		ClientHandler.Broadcast = make(chan models.Entry, config.AppConfig.General.BufferSizes.BroadcastManager)
+		go ClientHandler.broadcaster()
+	})
 }
 
 // Start initializes the webserver and starts listening for connections.
