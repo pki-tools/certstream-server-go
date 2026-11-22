@@ -49,11 +49,22 @@ func parseData(entry *ct.RawLogEntry, operatorName, logName, ctURL string) (mode
 		UpdateType: "X509LogEntry",
 	}
 
-	// Convert RawLogEntry to ct.LogEntry
+	// Convert RawLogEntry to ct.LogEntry.
+	//
+	// ToLogEntry returns a usable entry together with a non-nil error when the
+	// certificate only parsed leniently - ct-go retries strict ASN.1 failures
+	// in "lax" mode and reports them as x509.NonFatalErrors. Such certificates
+	// are genuinely in the logs (a PrintableString containing '_' is a common
+	// example) and are exactly what that leniency exists to admit, so only a
+	// fatal error may reject the entry. Treating every error as fatal silently
+	// dropped them from the stream.
 	logEntry, conversionErr := entry.ToLogEntry()
+	if x509.IsFatal(conversionErr) || logEntry == nil {
+		return models.Data{}, fmt.Errorf("could not convert entry to LogEntry: %w", conversionErr)
+	}
+
 	if conversionErr != nil {
-		log.Println("Could not convert entry to LogEntry: ", conversionErr)
-		return models.Data{}, conversionErr
+		recordLenientParse()
 	}
 
 	var cert *x509.Certificate

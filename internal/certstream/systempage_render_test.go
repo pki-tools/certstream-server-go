@@ -134,3 +134,24 @@ func TestSystemPageCPUTileReadsInCores(t *testing.T) {
 		t.Errorf("CPU tile should say what the figure means:\n%s", tile)
 	}
 }
+
+// TestSystemPageRendersLenientParses renders the tile that reports how many
+// entries only parsed leniently - the number that decides whether a strict,
+// faster parser could be adopted without dropping entries.
+func TestSystemPageRendersLenientParses(t *testing.T) {
+	rec := httptest.NewRecorder()
+	systemHandler(rec, httptest.NewRequest(http.MethodGet, "/system", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	tile := section(rec.Body.String(), "Lenient parses")
+	if tile == "(section not found)" {
+		t.Fatal("lenient parses tile missing")
+	}
+
+	if !strings.Contains(tile, "% of entries") {
+		t.Errorf("tile should state the share of entries:\n%s", tile)
+	}
+}

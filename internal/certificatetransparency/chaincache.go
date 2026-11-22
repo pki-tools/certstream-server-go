@@ -88,3 +88,18 @@ func SeedChainCacheForTest(der []byte, hits, misses int64) {
 	chainCacheHits.Store(hits)
 	chainCacheMisses.Store(misses)
 }
+
+// lenientParses counts entries whose certificate parsed only in ct-go's lax
+// mode, i.e. strict ASN.1 rejected it and the entry was accepted with a
+// non-fatal error.
+//
+// It doubles as the measurement needed before swapping the parser for the
+// standard library's faster, strict one: every entry counted here is one the
+// standard library would refuse, so the ratio to all parsed entries is the
+// share a naive switch would silently drop.
+var lenientParses atomic.Int64
+
+func recordLenientParse() { lenientParses.Add(1) }
+
+// LenientParses returns the number of entries accepted with non-fatal errors.
+func LenientParses() int64 { return lenientParses.Load() }

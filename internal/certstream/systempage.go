@@ -75,6 +75,12 @@ type systemPageData struct {
 	ChainCacheKnown bool
 
 	FetchStats []fetchView
+
+	// LenientParses counts entries accepted only through ct-go's lax ASN.1
+	// mode. LenientPercent is their share of processed entries: the fraction a
+	// strict parser such as the standard library's would refuse.
+	LenientParses  int64
+	LenientPercent float64
 }
 
 // fetchView is one row of the fetch-efficiency table.
@@ -343,6 +349,11 @@ const systemSectionMarkup = `
     <div class="stat-sub">429/503 from log operators</div>
   </div>
   <div class="stat">
+    <div class="stat-label">Lenient parses</div>
+    <div class="stat-value">{{num .LenientParses}}</div>
+    <div class="stat-sub">{{f2 .LenientPercent}}% of entries · a strict parser would drop these</div>
+  </div>
+  <div class="stat">
     <div class="stat-label">Chain cache</div>
     <div class="stat-value">{{if .ChainCacheKnown}}{{pct0 .ChainCacheRatio}}{{else}}—{{end}}</div>
     <div class="stat-sub">issuer parses avoided · {{.ChainCacheSize}} cached</div>
@@ -476,6 +487,11 @@ func buildSystemPageData() systemPageData {
 	}
 
 	data.Processed = data.Certs + data.Precerts
+
+	data.LenientParses = certificatetransparency.LenientParses()
+	if data.Processed > 0 {
+		data.LenientPercent = 100 * float64(data.LenientParses) / float64(data.Processed)
+	}
 
 	// Issuer-chain cache effectiveness. Parsing a chain certificate costs about
 	// as much as parsing the leaf, so a high hit ratio is what keeps per-entry
