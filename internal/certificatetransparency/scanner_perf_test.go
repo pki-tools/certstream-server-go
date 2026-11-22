@@ -51,7 +51,8 @@ func makeLeafEntry(tb testing.TB, leafDER []byte, chain ...[]byte) *ct.LeafEntry
 //   - leaf_matcher is scanner.processMatcherLeafEntry, taken for a
 //     scanner.LeafMatcher, which parses nothing itself.
 //
-// See matchAllLeaves for the switch from one to the other.
+// Production now uses neither: scanEntries drives the fetcher directly and
+// decodes with decodeLeafEntry. BenchmarkLeafDecode measures that path.
 func BenchmarkScannerPath(b *testing.B) {
 	leaf := makeDER(b, "www.example.com", []string{"www.example.com", "example.com", "cdn.example.com"}, false)
 	inter := makeDER(b, "Example Intermediate CA", nil, true)
@@ -75,6 +76,45 @@ func BenchmarkScannerPath(b *testing.B) {
 	b.Run("leaf_matcher", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			rle, err := ct.RawLogEntryFromLeaf(int64(i), le)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if _, err := parseData(rle, "Op", "log", "https://ct.example.com/log"); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
+// BenchmarkLeafDecode compares the reflection-based reference decoder with the
+// cryptobyte one on the same entry, and shows the end-to-end effect.
+func BenchmarkLeafDecode(b *testing.B) {
+	leaf := makeDER(b, "www.example.com", []string{"www.example.com", "example.com", "cdn.example.com"}, false)
+	inter := makeDER(b, "Example Intermediate CA", nil, true)
+	le := makeLeafEntry(b, leaf, inter)
+
+	b.Run("decode_reference", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if _, err := ct.RawLogEntryFromLeaf(int64(i), le); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+
+	b.Run("decode_cryptobyte", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if _, err := decodeLeafEntry(int64(i), le); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+
+	b.Run("end_to_end_cryptobyte", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			rle, err := decodeLeafEntry(int64(i), le)
 			if err != nil {
 				b.Fatal(err)
 			}

@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"filippo.io/sunlight"
-	"github.com/google/certificate-transparency-go/scanner"
 	ctx509 "github.com/google/certificate-transparency-go/x509"
 )
 
@@ -74,26 +73,5 @@ func TestParseTiledEntryAcceptsLenientCertificate(t *testing.T) {
 func TestParseDataRejectsFatalErrors(t *testing.T) {
 	if _, err := parseData(makeEntry([]byte{0x30, 0x03, 0x02, 0x01}), "Op", "log", "https://ct.example.com/log"); err == nil {
 		t.Error("parseData accepted a truncated, unparseable certificate")
-	}
-}
-
-// TestMatchAllLeavesTakesTheNoParsePath pins the property the matcher exists
-// for. The scanner's type switch checks Matcher before LeafMatcher, so if this
-// type ever gains CertificateMatches it silently returns to the path that
-// parses every certificate once more and throws the result away.
-func TestMatchAllLeavesTakesTheNoParsePath(t *testing.T) {
-	var m interface{} = matchAllLeaves{}
-
-	if _, ok := m.(scanner.Matcher); ok {
-		t.Fatal("matchAllLeaves satisfies scanner.Matcher, so the scanner would parse every entry an extra time")
-	}
-
-	lm, ok := m.(scanner.LeafMatcher)
-	if !ok {
-		t.Fatal("matchAllLeaves must satisfy scanner.LeafMatcher")
-	}
-
-	if !lm.Matches(nil) {
-		t.Error("matchAllLeaves must accept every entry")
 	}
 }

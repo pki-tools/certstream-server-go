@@ -528,6 +528,18 @@ func (w *worker) stop() {
 	w.cancel()
 }
 
+// resumePosition picks the index a (re)starting worker should fetch from: the
+// further of where it was originally placed and how far the log has got. With
+// recovery disabled the worker jumps to the current tree head regardless, so
+// its position is left alone.
+func resumePosition(current, recorded uint64, recoveryEnabled bool) uint64 {
+	if recoveryEnabled && recorded > current {
+		return recorded
+	}
+
+	return current
+}
+
 // runWorker runs a single worker for a single CT log. This method is blocking.
 func (w *worker) runWorker(ctx context.Context) error {
 	hc := NewRateLimitedClient(w.ctURL, w.name, 30*time.Second)
@@ -537,9 +549,21 @@ func (w *worker) runWorker(ctx context.Context) error {
 		return errCreatingClient
 	}
 
+	normURL := normalizeCtlogURL(w.ctURL)
+
 	// If recovery is enabled, we start at the saved index. Otherwise, we start at the latest STH.
 	recoveryEnabled := config.AppConfig.General.Recovery.Enabled
 	startAtHead := config.AppConfig.General.Recovery.StartAtHead
+
+	// Resume from how far this log has actually got, not from where this
+	// worker first started. runWorker runs again after every restart - a
+	// catch-up toggle, or a transient error such as a failed STH fetch - and
+	// w.ctIndex is only the position it was originally given. Without this, a
+	// worker that had been running for hours re-fetched and re-broadcast
+	// everything since it began each time it restarted, which hits hardest on
+	// exactly the backlogged logs that catch-up is used for.
+	w.ctIndex = resumePosition(w.ctIndex, metrics.GetCTIndex(normURL), recoveryEnabled)
+
 	if !recoveryEnabled || (startAtHead && w.ctIndex == 0) {
 		sth, getSTHerr := jsonClient.GetSTH(ctx)
 		if getSTHerr != nil {
@@ -569,8 +593,6 @@ func (w *worker) runWorker(ctx context.Context) error {
 			"no saved index for this log, so it is backfilling from index 0 - this is a cold start, not a throughput problem. Set recovery.start_at_head: true to begin at the current STH instead")
 	}
 
-	normURL := normalizeCtlogURL(w.ctURL)
-
 	// Apply catch-up overrides: RFC 6962 caps get-entries at 1000.
 	batchSize := config.AppConfig.General.Scanner.BatchSize
 	parallelFetch := config.AppConfig.General.Scanner.ParallelFetch
@@ -599,31 +621,27 @@ func (w *worker) runWorker(ctx context.Context) error {
 		}()
 	}
 
-	certScanner := scanner.NewScanner(jsonClient, scanner.ScannerOptions{
-		FetcherOptions: scanner.FetcherOptions{
-			BatchSize:     batchSize,
-			ParallelFetch: parallelFetch,
-			StartIndex:    int64(w.ctIndex),
-			Continuous:    true,
-		},
-		Matcher:     matchAllLeaves{},
-		PrecertOnly: false,
-		NumWorkers:  numWorkers,
-		BufferSize:  config.AppConfig.General.BufferSizes.CTLog,
-	})
+	scanErr := w.scanEntries(ctx, scanCtx, jsonClient, scanner.FetcherOptions{
+		BatchSize:     batchSize,
+		ParallelFetch: parallelFetch,
+		StartIndex:    int64(w.ctIndex),
+		Continuous:    true,
+	}, numWorkers, config.AppConfig.General.BufferSizes.CTLog)
 
-	scanErr := certScanner.Scan(scanCtx, w.foundCertCallback, w.foundPrecertCallback)
+	// A cancelled scan context with a live outer context is a planned restart
+	// to pick up catch-up settings. This has to be checked whatever scanErr is:
+	// scanner.Fetcher.Run returns nil when its context is cancelled, so the
+	// previous check - made only when the scan returned an error - never fired.
+	// The restart then took the error path instead: a misleading "sleeping due
+	// to error" message, a 5 second pause, and a resume from a stale index.
+	if scanCtx.Err() != nil && ctx.Err() == nil {
+		return errScannerRestart
+	}
+
 	if scanErr != nil {
-		// If the inner context was cancelled but the outer one wasn't, this is a
-		// planned restart (catch-up signal), not a real scan error.
-		if scanCtx.Err() != nil && ctx.Err() == nil {
-			if latest := metrics.GetCTIndex(normURL); latest > w.ctIndex {
-				w.ctIndex = latest
-			}
-			return errScannerRestart
-		}
 		log.Println("Scan error: ", scanErr)
 		RecordError(w.ctURL, w.name, ErrCatScan, scanErr.Error())
+
 		return scanErr
 	}
 
@@ -631,28 +649,6 @@ func (w *worker) runWorker(ctx context.Context) error {
 
 	return nil
 }
-
-// matchAllLeaves is a scanner.LeafMatcher that accepts every entry.
-//
-// It replaces scanner.MatchAll, which looks equivalent and is not. MatchAll is
-// a scanner.Matcher, and for a Matcher the scanner must hand it a parsed
-// certificate: processMatcherEntry calls ToLogEntry() - a full x509 parse - on
-// every entry purely to evaluate CertificateMatches, which for MatchAll returns
-// true unconditionally. The scanner then passes the callbacks the *raw* entry,
-// so parseData parses the same certificate a second time and the first result
-// is discarded.
-//
-// A LeafMatcher is consulted on the undecoded leaf instead, so the scanner
-// takes processMatcherLeafEntry and parses nothing. Measured end to end
-// (BenchmarkScannerPath) this takes an RFC 6962 entry from ~77 us to ~44 us.
-//
-// Entries that fail to parse fatally are still dropped, now by parseData, which
-// records them under the parse category on /errors; previously the scanner
-// dropped them itself and only logged at klog verbosity, out of sight.
-type matchAllLeaves struct{}
-
-// Matches accepts every leaf.
-func (matchAllLeaves) Matches(*ct.LeafEntry) bool { return true }
 
 // foundCertCallback is the callback that handles cases where new regular certs are found.
 func (w *worker) foundCertCallback(rawEntry *ct.RawLogEntry) {
