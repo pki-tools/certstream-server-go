@@ -46,7 +46,8 @@ type ScannerOptions struct {
 	// ParallelFetch is the number of concurrent HTTP fetch requests per regular log.
 	// Values above 3 risk rate-limiting from log operators.
 	ParallelFetch int `yaml:"parallel_fetch"`
-	// NumWorkers is the number of parsing goroutines per regular log.
+	// NumWorkers is the number of certificate-parsing goroutines per log, for
+	// both regular (RFC 6962) and tiled (static-CT) logs.
 	NumWorkers int `yaml:"num_workers"`
 	// TiledBatchSize is obsolete and ignored. It once capped the entries a tiled
 	// log processed per poll; once batches were drained back-to-back it bounded

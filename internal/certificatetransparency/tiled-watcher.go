@@ -265,35 +265,66 @@ func (tw *tiledWorker) drainBatch(ctx context.Context, client *sunlight.Client) 
 	// on ctx, and the iterator checks it between entries.
 	batchCount := 0
 
+	// Certificates are parsed by a pool of num_workers goroutines, as on the
+	// RFC 6962 path. They used to be parsed inline on this goroutine, so a
+	// backlogged tiled log could never use more than one core however many
+	// the machine had - num_workers did not apply to tiled logs at all.
+	//
+	// The iterator itself stays here: it is not safe to share, and the work
+	// it does per entry (splitting the tile and hash-checking the leaf) is a
+	// fraction of parsing the certificate. Each yielded entry is freshly
+	// allocated over tile data that is never reused, so workers may hold it
+	// after the iterator moves on.
+	//
+	// ctIndex advances as entries are handed off. All handed-off entries are
+	// finished before drainBatch returns, so at every return ctIndex again
+	// means "processed up to here" - unless ctx was cancelled, when the worker
+	// is stopping anyway.
+	workers := config.AppConfig.General.Scanner.NumWorkers
+	if workers < 1 {
+		workers = 1
+	}
+
+	jobs := make(chan tiledJob, workers*32)
+
+	var wg sync.WaitGroup
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			for job := range jobs {
+				tw.processTiledEntry(ctx, job.index, job.entry)
+			}
+		}()
+	}
+
+	cancelled := false
+
+dispatch:
 	for index, entry := range client.Entries(ctx, tw.tree, tw.ctIndex) {
 		if entry == nil {
 			continue
 		}
 
-		certstreamEntry, parseErr := tw.parseTiledEntry(entry, index)
-		if parseErr != nil {
-			log.Printf("Error parsing tiled entry at index %d: %s\n", index, parseErr)
-			RecordError(tw.monitoringURL, tw.name, ErrCatParse, fmt.Sprintf("index %d: %s", index, parseErr))
-			continue
-		}
-
-		// Context-aware send so a full channel can't freeze this goroutine and
-		// prevent context cancellation from propagating.
 		select {
-		case tw.entryChan <- certstreamEntry:
+		case jobs <- tiledJob{index: index, entry: entry}:
 		case <-ctx.Done():
-			return false, nil
+			cancelled = true
+			break dispatch
 		}
 
 		tw.ctIndex = index + 1
-
-		if entry.IsPrecert {
-			atomic.AddInt64(&processedPrecerts, 1)
-		} else {
-			atomic.AddInt64(&processedCerts, 1)
-		}
-
 		batchCount++
+	}
+
+	close(jobs)
+	wg.Wait()
+
+	if cancelled || ctx.Err() != nil {
+		return false, nil
 	}
 
 	if iterErr := client.Err(); iterErr != nil {
@@ -394,6 +425,38 @@ func isPartialTile(err error) bool {
 	}
 
 	return strings.Contains(err.Error(), ".p/")
+}
+
+// tiledJob is one verified tile entry awaiting parsing.
+type tiledJob struct {
+	index int64
+	entry *sunlight.LogEntry
+}
+
+// processTiledEntry parses one entry and hands it to the pipeline. It runs on
+// drainBatch's worker pool, so it may only read the worker's configuration.
+func (tw *tiledWorker) processTiledEntry(ctx context.Context, index int64, entry *sunlight.LogEntry) {
+	certstreamEntry, parseErr := tw.parseTiledEntry(entry, index)
+	if parseErr != nil {
+		log.Printf("Error parsing tiled entry at index %d: %s\n", index, parseErr)
+		RecordError(tw.monitoringURL, tw.name, ErrCatParse, fmt.Sprintf("index %d: %s", index, parseErr))
+
+		return
+	}
+
+	// Context-aware send so a full channel can't freeze this goroutine and
+	// prevent context cancellation from propagating.
+	select {
+	case tw.entryChan <- certstreamEntry:
+	case <-ctx.Done():
+		return
+	}
+
+	if entry.IsPrecert {
+		atomic.AddInt64(&processedPrecerts, 1)
+	} else {
+		atomic.AddInt64(&processedCerts, 1)
+	}
 }
 
 // parseTiledEntry converts a sunlight.LogEntry to a models.Entry.

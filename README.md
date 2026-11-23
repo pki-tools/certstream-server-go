@@ -120,7 +120,7 @@ general:
   scanner:
     batch_size: 1000        # entries requested per HTTP request for regular logs (max 1000)
     parallel_fetch: 1       # concurrent fetches per regular log (>3 risks rate-limiting)
-    num_workers: 2          # parsing goroutines per regular log (default: cores, max 4)
+    num_workers: 2          # parsing goroutines per log, regular and tiled (default: cores, max 4)
 
   recovery:
     enabled: true
@@ -390,6 +390,7 @@ The runtime needs no help: `GOMAXPROCS` is never set in this codebase, so it def
 
 - Total parsing parallelism is `num_workers` × *the number of logs currently behind*, not × the number of configured logs — a caught-up log's workers are blocked on an empty channel and consume nothing.
 - With `num_workers: 1` and one backlogged log, the entire parsing workload is a single goroutine, which is one core. The second core has nothing to run.
+- This applies to **tiled logs too**. They used to parse every entry inline on the single goroutine iterating the log, so `num_workers` did not reach them: one backlogged tiled log could never use more than one core. They now parse on a pool of `num_workers` goroutines, which roughly doubles a tiled log's drain rate on a 2-core machine.
 
 This is why the default is now one worker per schedulable core (capped at 4) rather than 1. Unlike `parallel_fetch`, raising it issues no extra HTTP requests and so cannot attract rate limiting — it is purely local parallelism and safe to tune.
 
