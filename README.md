@@ -121,7 +121,6 @@ general:
     batch_size: 1000        # entries requested per HTTP request for regular logs (max 1000)
     parallel_fetch: 1       # concurrent fetches per regular log (>3 risks rate-limiting)
     num_workers: 2          # parsing goroutines per regular log (default: cores, max 4)
-    tiled_batch_size: 500   # max entries per 30s tick for tiled logs
 
   recovery:
     enabled: true
@@ -673,7 +672,7 @@ These settings control how aggressively the server fetches entries from CT logs.
 | `scanner.batch_size` | `1000` | Entries requested per HTTP `get-entries` request for regular (RFC 6962) logs; this is the spec maximum. Logs may return fewer, in which case the remainder is re-requested — see [What `batch_size` actually controls](#what-batch_size-actually-controls). |
 | `scanner.parallel_fetch` | `1` | Concurrent `get-entries` requests per regular log. Increasing to `2` roughly doubles catch-up throughput; values above `3` risk 429 rate-limiting from log operators. |
 | `scanner.num_workers` | cores, capped at 4 | Certificate parsing goroutines **per log**. This is the only parallelism that applies to parsing, and it costs the operator nothing — it issues no extra requests, so unlike `parallel_fetch` it cannot attract rate limiting. See [Only one core is busy](#only-one-core-is-busy). |
-| `scanner.tiled_batch_size` | `500` | Maximum entries processed per 30-second polling tick for tiled (sunlight) logs. Caps catch-up speed to prevent memory spikes from a single tiled log flooding the pipeline. |
+| `scanner.tiled_batch_size` | — | **Obsolete, ignored.** Cutting a tiled log's tile iterator short after this many entries made it re-download each 50-tile window about 20 times — on a backlogged tiled log, far more CPU than parsing. Still accepted so existing configs load. |
 
 **For faster catch-up** (if the server has been offline or is significantly behind):
 
@@ -682,7 +681,6 @@ scanner:
   batch_size: 1000
   parallel_fetch: 2
   num_workers: 2
-  tiled_batch_size: 2000
 ```
 
 **Conservative defaults** (prioritise stability and memory over catch-up speed):
@@ -692,7 +690,6 @@ scanner:
   batch_size: 256
   parallel_fetch: 1
   num_workers: 2
-  tiled_batch_size: 500
 ```
 
 Note: when running with many logs simultaneously, `parallel_fetch: 2` means up to ~100 concurrent outbound HTTP connections (50 logs × 2). Ensure the host OS and any upstream firewall allow this.

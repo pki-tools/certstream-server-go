@@ -48,7 +48,10 @@ type ScannerOptions struct {
 	ParallelFetch int `yaml:"parallel_fetch"`
 	// NumWorkers is the number of parsing goroutines per regular log.
 	NumWorkers int `yaml:"num_workers"`
-	// TiledBatchSize is the maximum entries processed per 30-second tick for tiled logs.
+	// TiledBatchSize is obsolete and ignored. It once capped the entries a tiled
+	// log processed per poll; once batches were drained back-to-back it bounded
+	// nothing, and cutting torchwood's tile iterator short made it re-download
+	// each 50-tile window about 20 times. Kept so existing configs still load.
 	TiledBatchSize int `yaml:"tiled_batch_size"`
 }
 

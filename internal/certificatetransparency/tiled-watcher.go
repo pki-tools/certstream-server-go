@@ -247,11 +247,22 @@ func (tw *tiledWorker) drainBatch(ctx context.Context, client *sunlight.Client) 
 		return true, nil
 	}
 
-	batchLimit := config.AppConfig.General.Scanner.TiledBatchSize
-	if batchLimit <= 0 {
-		batchLimit = 500
-	}
-
+	// The iterator is consumed to the end rather than cut off after a fixed
+	// number of entries.
+	//
+	// torchwood's Entries downloads up to 50 data tiles per window and keeps
+	// them only for the life of the iterator. This loop used to break after
+	// tiled_batch_size entries (default 500, about two tiles), discarding the
+	// rest of the window, and the next call downloaded the same window again:
+	// every data tile was fetched roughly 20 times over, each time decompressed,
+	// decrypted and hash-verified. On a tiled log that was behind, that
+	// redundant work cost far more CPU than parsing the certificates.
+	//
+	// The cap dated from when a tiled log handled one batch per poll interval.
+	// Since batches are drained back-to-back it bounded nothing, and the window
+	// is already bounded by torchwood, so running the iterator out is both
+	// cheaper and no less responsive to cancellation: every send below selects
+	// on ctx, and the iterator checks it between entries.
 	batchCount := 0
 
 	for index, entry := range client.Entries(ctx, tw.tree, tw.ctIndex) {
@@ -283,9 +294,6 @@ func (tw *tiledWorker) drainBatch(ctx context.Context, client *sunlight.Client) 
 		}
 
 		batchCount++
-		if batchCount >= batchLimit {
-			break
-		}
 	}
 
 	if iterErr := client.Err(); iterErr != nil {
