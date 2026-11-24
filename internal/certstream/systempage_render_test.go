@@ -155,3 +155,25 @@ func TestSystemPageRendersLenientParses(t *testing.T) {
 		t.Errorf("tile should state the share of entries:\n%s", tile)
 	}
 }
+
+// TestSystemPageRendersFastParser renders the fast parser tile, including the
+// mismatch count that is the production safety net for the parser switch.
+func TestSystemPageRendersFastParser(t *testing.T) {
+	rec := httptest.NewRecorder()
+	systemHandler(rec, httptest.NewRequest(http.MethodGet, "/system", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	tile := section(rec.Body.String(), "Fast parser")
+	if tile == "(section not found)" {
+		t.Fatal("fast parser tile missing")
+	}
+
+	for _, want := range []string{"fell back to ct-go", "mismatches", "checks"} {
+		if !strings.Contains(tile, want) {
+			t.Errorf("tile missing %q:\n%s", want, tile)
+		}
+	}
+}

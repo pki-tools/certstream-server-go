@@ -471,29 +471,25 @@ func (tw *tiledWorker) parseTiledEntry(entry *sunlight.LogEntry, index int64) (m
 	var isPrecert bool
 	var err error
 
+	// parseLeafCertificate handles both parsers, and non-fatal errors; see it.
 	if entry.IsPrecert {
 		// For precerts, entry.Certificate holds the raw TBS certificate bytes,
-		// not a full DER certificate, so ParseTBSCertificate must be used.
-		cert, err = x509.ParseTBSCertificate(entry.Certificate)
-		if x509.IsFatal(err) || cert == nil {
+		// not a full DER certificate.
+		cert, err = parseLeafCertificate(entry.Certificate, true)
+		if err != nil {
 			return models.Entry{}, fmt.Errorf("failed to parse precert TBS certificate: %w", err)
 		}
+
 		rawData = entry.PreCertificate
 		isPrecert = true
 	} else {
-		cert, err = x509.ParseCertificate(entry.Certificate)
-		if x509.IsFatal(err) || cert == nil {
+		cert, err = parseLeafCertificate(entry.Certificate, false)
+		if err != nil {
 			return models.Entry{}, fmt.Errorf("failed to parse certificate: %w", err)
 		}
+
 		rawData = entry.Certificate
 		isPrecert = false
-	}
-
-	// A non-fatal error means the certificate parsed in ct-go's lax mode and is
-	// usable; see the equivalent note in parseData. Rejecting it dropped real
-	// log entries.
-	if err != nil {
-		recordLenientParse()
 	}
 
 	data, err := tw.buildDataFromCert(cert, index, isPrecert, rawData)

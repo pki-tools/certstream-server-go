@@ -49,39 +49,47 @@ func parseData(entry *ct.RawLogEntry, operatorName, logName, ctURL string) (mode
 		UpdateType: "X509LogEntry",
 	}
 
-	// Convert RawLogEntry to ct.LogEntry.
-	//
-	// ToLogEntry returns a usable entry together with a non-nil error when the
-	// certificate only parsed leniently - ct-go retries strict ASN.1 failures
-	// in "lax" mode and reports them as x509.NonFatalErrors. Such certificates
-	// are genuinely in the logs (a PrintableString containing '_' is a common
-	// example) and are exactly what that leniency exists to admit, so only a
-	// fatal error may reject the entry. Treating every error as fatal silently
-	// dropped them from the stream.
-	logEntry, conversionErr := entry.ToLogEntry()
-	if x509.IsFatal(conversionErr) || logEntry == nil {
-		return models.Data{}, fmt.Errorf("could not convert entry to LogEntry: %w", conversionErr)
-	}
-
-	if conversionErr != nil {
-		recordLenientParse()
-	}
-
+	// Parse the certificate straight from the entry rather than via
+	// RawLogEntry.ToLogEntry, which always uses ct-go's slower parser; see
+	// parseLeafCertificate. A precertificate entry carries the bare
+	// TBSCertificate the log stores, with the submitted precertificate in
+	// entry.Cert.
 	var cert *x509.Certificate
 	var rawData []byte
 	var isPrecert bool
+	var parseErr error
 
-	switch {
-	case logEntry.X509Cert != nil:
-		cert = logEntry.X509Cert
-		rawData = logEntry.X509Cert.Raw
-		isPrecert = false
-	case logEntry.Precert != nil:
-		cert = logEntry.Precert.TBSCertificate
-		rawData = logEntry.Precert.Submitted.Data
+	te := entry.Leaf.TimestampedEntry
+	if te == nil {
+		return models.Data{}, errors.New("could not parse entry: no timestamped entry")
+	}
+
+	switch te.EntryType {
+	case ct.X509LogEntryType:
+		if te.X509Entry == nil {
+			return models.Data{}, errors.New("could not parse entry: x509 entry without a certificate")
+		}
+
+		cert, parseErr = parseLeafCertificate(te.X509Entry.Data, false)
+		if parseErr != nil {
+			return models.Data{}, fmt.Errorf("failed to parse certificate: %w", parseErr)
+		}
+
+		rawData = cert.Raw
+	case ct.PrecertLogEntryType:
+		if te.PrecertEntry == nil {
+			return models.Data{}, errors.New("could not parse entry: precert entry without a TBSCertificate")
+		}
+
+		cert, parseErr = parseLeafCertificate(te.PrecertEntry.TBSCertificate, true)
+		if parseErr != nil {
+			return models.Data{}, fmt.Errorf("failed to parse precertificate: %w", parseErr)
+		}
+
+		rawData = entry.Cert.Data
 		isPrecert = true
 	default:
-		return models.Data{}, errors.New("could not parse entry: no certificate found")
+		return models.Data{}, fmt.Errorf("could not parse entry: unknown entry type %v", te.EntryType)
 	}
 
 	// Calculate certificate hash from the raw DER bytes of the certificate
@@ -105,8 +113,7 @@ func parseData(entry *ct.RawLogEntry, operatorName, logName, ctURL string) (mode
 	certAsDER := base64.StdEncoding.EncodeToString(entry.Cert.Data)
 	data.LeafCert.AsDER = certAsDER
 
-	var parseErr error
-	data.Chain, parseErr = parseCertificateChain(logEntry)
+	data.Chain, parseErr = parseCertificateChain(entry.Chain)
 	if parseErr != nil {
 		log.Println("Could not parse certificate chain: ", parseErr)
 		return models.Data{}, parseErr
@@ -115,11 +122,11 @@ func parseData(entry *ct.RawLogEntry, operatorName, logName, ctURL string) (mode
 	return data, nil
 }
 
-// parseCertificateChain returns the certificate chain in form of a []LeafCert from the given *ct.LogEntry.
-func parseCertificateChain(logEntry *ct.LogEntry) ([]models.LeafCert, error) {
-	chain := make([]models.LeafCert, len(logEntry.Chain))
+// parseCertificateChain returns an entry's certificate chain as []LeafCert.
+func parseCertificateChain(entries []ct.ASN1Cert) ([]models.LeafCert, error) {
+	chain := make([]models.LeafCert, len(entries))
 
-	for i, chainEntry := range logEntry.Chain {
+	for i, chainEntry := range entries {
 		// Issuer certificates repeat across effectively every entry, and parsing
 		// them is the single largest per-entry cost. See chaincache.go.
 		if cached, ok := lookupChainCert(chainEntry.Data); ok {
@@ -127,7 +134,10 @@ func parseCertificateChain(logEntry *ct.LogEntry) ([]models.LeafCert, error) {
 			continue
 		}
 
-		myCert, parseErr := x509.ParseCertificate(chainEntry.Data)
+		// Through parseLeafCertificate for the faster parser and, as importantly,
+		// its handling of non-fatal errors: a chain certificate ct-go accepted
+		// only leniently used to fail the whole entry.
+		myCert, parseErr := parseLeafCertificate(chainEntry.Data, false)
 		if parseErr != nil {
 			log.Println("Error parsing certificate: ", parseErr)
 			return nil, parseErr

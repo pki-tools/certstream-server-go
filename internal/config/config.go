@@ -49,6 +49,10 @@ type ScannerOptions struct {
 	// NumWorkers is the number of certificate-parsing goroutines per log, for
 	// both regular (RFC 6962) and tiled (static-CT) logs.
 	NumWorkers int `yaml:"num_workers"`
+	// FastParser parses certificates with the standard library first, falling
+	// back to certificate-transparency-go when it refuses one. Defaults to true;
+	// set false to parse everything with ct-go as before.
+	FastParser *bool `yaml:"fast_parser"`
 	// TiledBatchSize is obsolete and ignored. It once capped the entries a tiled
 	// log processed per poll; once batches were drained back-to-back it bounded
 	// nothing, and cutting torchwood's tile iterator short made it re-download
@@ -391,6 +395,11 @@ func validateConfig(config *Config) bool {
 	// workers, while cheap, are not free.
 	if config.General.Scanner.NumWorkers <= 0 {
 		config.General.Scanner.NumWorkers = defaultNumWorkers()
+	}
+
+	if config.General.Scanner.FastParser == nil {
+		fastParser := true
+		config.General.Scanner.FastParser = &fastParser
 	}
 
 	if config.General.Scanner.TiledBatchSize <= 0 {

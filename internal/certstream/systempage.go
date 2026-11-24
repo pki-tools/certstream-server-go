@@ -81,6 +81,12 @@ type systemPageData struct {
 	// strict parser such as the standard library's would refuse.
 	LenientParses  int64
 	LenientPercent float64
+
+	// Fast parser: certificates parsed by the standard library, with how many
+	// fell back to ct-go and how live re-checks against ct-go are going.
+	FastParser      certificatetransparency.FastParserStats
+	FastPercent     float64
+	FastParserKnown bool
 }
 
 // fetchView is one row of the fetch-efficiency table.
@@ -349,6 +355,11 @@ const systemSectionMarkup = `
     <div class="stat-sub">429/503 from log operators</div>
   </div>
   <div class="stat">
+    <div class="stat-label">Fast parser</div>
+    <div class="stat-value">{{if not .FastParser.Enabled}}off{{else if .FastParserKnown}}{{pct0 .FastPercent}}{{else}}—{{end}}</div>
+    <div class="stat-sub">{{num .FastParser.Fallbacks}} fell back to ct-go · {{if .FastParser.ShadowMismatches}}<b style="color:var(--bad,#c0392b)">{{num .FastParser.ShadowMismatches}} mismatches</b>{{else}}0 mismatches{{end}} in {{num .FastParser.ShadowChecks}} checks</div>
+  </div>
+  <div class="stat">
     <div class="stat-label">Lenient parses</div>
     <div class="stat-value">{{num .LenientParses}}</div>
     <div class="stat-sub">{{f2 .LenientPercent}}% of entries · a strict parser would drop these</div>
@@ -487,6 +498,12 @@ func buildSystemPageData() systemPageData {
 	}
 
 	data.Processed = data.Certs + data.Precerts
+
+	data.FastParser = certificatetransparency.GetFastParserStats()
+	if total := data.FastParser.Fast + data.FastParser.Fallbacks; total > 0 {
+		data.FastPercent = 100 * float64(data.FastParser.Fast) / float64(total)
+		data.FastParserKnown = true
+	}
 
 	data.LenientParses = certificatetransparency.LenientParses()
 	if data.Processed > 0 {

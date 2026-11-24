@@ -1,13 +1,13 @@
 package certificatetransparency
 
 import (
-	"crypto/x509"
 	"fmt"
 	"reflect"
 	"testing"
 
 	ct "github.com/google/certificate-transparency-go"
 	cttls "github.com/google/certificate-transparency-go/tls"
+	ctx509 "github.com/google/certificate-transparency-go/x509"
 )
 
 // referenceLeafEntry encodes an entry with certificate-transparency-go's own
@@ -30,8 +30,10 @@ func referenceLeafEntry(tb testing.TB, precert bool, ext []byte, leafDER []byte,
 		// A precert leaf carries the TBSCertificate, not the whole certificate.
 		// Using the whole certificate here would still decode, but would fail
 		// as soon as anything parsed it.
-		parsed, perr := x509.ParseCertificate(leafDER)
-		if perr != nil {
+		// ct-go's parser, the more permissive of the two, so fixtures the
+		// standard library refuses can still be turned into precert entries.
+		parsed, perr := ctx509.ParseCertificate(leafDER)
+		if ctx509.IsFatal(perr) || parsed == nil {
 			tb.Fatal(perr)
 		}
 
