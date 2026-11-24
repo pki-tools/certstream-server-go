@@ -3,7 +3,6 @@ package certificatetransparency
 import (
 	"context"
 	"crypto"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"log"
@@ -528,21 +527,14 @@ func (tw *tiledWorker) buildDataFromCert(cert *x509.Certificate, index int64, is
 		},
 	}
 
-	// Convert certificate to LeafCert
-	data.LeafCert = leafCertFromX509cert(*cert)
+	// Identified by the published DER - for a precertificate the submitted
+	// precertificate, not the TBSCertificate that was parsed. See
+	// leafCertWithIdentity.
+	data.LeafCert = leafCertWithIdentity(*cert, rawData)
 
-	// If it's a precert, recalculate hashes and set poison byte
 	if isPrecert {
-		calculatedHash := calculateSHA1(rawData)
-		data.LeafCert.Fingerprint = calculatedHash
-		data.LeafCert.SHA1 = calculatedHash
-		data.LeafCert.SHA256 = calculateSHA256(rawData)
 		data.LeafCert.Extensions.CTLPoisonByte = true
 	}
-
-	// Set AsDER
-	certAsDER := base64.StdEncoding.EncodeToString(rawData)
-	data.LeafCert.AsDER = certAsDER
 
 	// Note: Chain parsing is not available for tiled logs in the same way
 	// The ChainFingerprints field exists but we'd need to fetch the actual certs

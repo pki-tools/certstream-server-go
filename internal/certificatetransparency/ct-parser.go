@@ -55,7 +55,6 @@ func parseData(entry *ct.RawLogEntry, operatorName, logName, ctURL string) (mode
 	// TBSCertificate the log stores, with the submitted precertificate in
 	// entry.Cert.
 	var cert *x509.Certificate
-	var rawData []byte
 	var isPrecert bool
 	var parseErr error
 
@@ -75,7 +74,6 @@ func parseData(entry *ct.RawLogEntry, operatorName, logName, ctURL string) (mode
 			return models.Data{}, fmt.Errorf("failed to parse certificate: %w", parseErr)
 		}
 
-		rawData = cert.Raw
 	case ct.PrecertLogEntryType:
 		if te.PrecertEntry == nil {
 			return models.Data{}, errors.New("could not parse entry: precert entry without a TBSCertificate")
@@ -86,22 +84,18 @@ func parseData(entry *ct.RawLogEntry, operatorName, logName, ctURL string) (mode
 			return models.Data{}, fmt.Errorf("failed to parse precertificate: %w", parseErr)
 		}
 
-		rawData = entry.Cert.Data
 		isPrecert = true
 	default:
 		return models.Data{}, fmt.Errorf("could not parse entry: unknown entry type %v", te.EntryType)
 	}
 
-	// Calculate certificate hash from the raw DER bytes of the certificate
-	data.LeafCert = leafCertFromX509cert(*cert)
+	// The entry is identified - AsDER, Fingerprint, SHA1, SHA256 - by the DER
+	// the log published: the certificate, or for a precertificate the
+	// submitted precertificate in entry.Cert rather than the TBSCertificate
+	// that was parsed. See leafCertWithIdentity.
+	data.LeafCert = leafCertWithIdentity(*cert, entry.Cert.Data)
 
-	// recalculate hashes if the certificate is a precertificate
 	if isPrecert {
-		calculatedHash := calculateSHA1(rawData)
-		data.LeafCert.Fingerprint = calculatedHash
-		data.LeafCert.SHA1 = calculatedHash
-		data.LeafCert.SHA256 = calculateSHA256(rawData)
-
 		// Since we use the TBSCertificate to parse the LeafCert, the PoisonByte indicator cannot be set by our parser.
 		// According to RFC 6962 Section 3.2 the `"tbs_certificate" is the DER-encoded TBSCertificate (see [RFC5280])
 		// component of the Precertificate -- that is, without the signature and the poison extension.`
@@ -109,9 +103,6 @@ func parseData(entry *ct.RawLogEntry, operatorName, logName, ctURL string) (mode
 		// X.509v3 client`, we can safely set it for each precertificate.
 		data.LeafCert.Extensions.CTLPoisonByte = true
 	}
-
-	certAsDER := base64.StdEncoding.EncodeToString(entry.Cert.Data)
-	data.LeafCert.AsDER = certAsDER
 
 	data.Chain, parseErr = parseCertificateChain(entry.Chain)
 	if parseErr != nil {
@@ -151,8 +142,23 @@ func parseCertificateChain(entries []ct.ASN1Cert) ([]models.LeafCert, error) {
 	return chain, nil
 }
 
-// leafCertFromX509cert converts a x509.Certificate to the custom LeafCert data structure.
+// leafCertFromX509cert converts a x509.Certificate to the custom LeafCert data
+// structure, identified by its own DER. Used for chain certificates; log
+// entries use leafCertWithIdentity.
 func leafCertFromX509cert(cert x509.Certificate) models.LeafCert {
+	return leafCertWithIdentity(cert, cert.Raw)
+}
+
+// leafCertWithIdentity converts a certificate to LeafCert, taking AsDER,
+// Fingerprint, SHA1 and SHA256 from identity rather than from cert.Raw.
+//
+// They differ for a precertificate entry, which is parsed from the bare
+// TBSCertificate the log stores but identified by the precertificate that was
+// submitted. Entry paths used to call leafCertFromX509cert, which hashed and
+// base64-encoded cert.Raw, and then overwrote all four fields from the right
+// bytes: every entry was base64-encoded twice, and every precertificate also
+// hashed with SHA-1 and SHA-256 twice. Passing the identity in does each once.
+func leafCertWithIdentity(cert x509.Certificate, identity []byte) models.LeafCert {
 	leafCert := models.LeafCert{
 		AllDomains:         cert.DNSNames,
 		Extensions:         models.Extensions{},
@@ -186,10 +192,10 @@ func leafCertFromX509cert(cert x509.Certificate) models.LeafCert {
 
 	leafCert.Issuer = buildSubject(cert.Issuer)
 
-	leafCert.AsDER = base64.StdEncoding.EncodeToString(cert.Raw)
-	leafCert.Fingerprint = calculateSHA1(cert.Raw)
+	leafCert.AsDER = base64.StdEncoding.EncodeToString(identity)
+	leafCert.Fingerprint = calculateSHA1(identity)
 	leafCert.SHA1 = leafCert.Fingerprint
-	leafCert.SHA256 = calculateSHA256(cert.Raw)
+	leafCert.SHA256 = calculateSHA256(identity)
 
 	// TODO fix Extensions - check x509util.go
 	for _, extension := range cert.Extensions {
