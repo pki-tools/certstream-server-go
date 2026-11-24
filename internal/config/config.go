@@ -53,6 +53,13 @@ type ScannerOptions struct {
 	// back to certificate-transparency-go when it refuses one. Defaults to true;
 	// set false to parse everything with ct-go as before.
 	FastParser *bool `yaml:"fast_parser"`
+	// HTTPCompression asks CT logs for gzip-compressed responses. Defaults to
+	// true. Setting false saves the CPU spent decompressing - about 17% in one
+	// production profile, almost all of it RFC 6962 get-entries responses - at
+	// the cost of several times the bandwidth on those logs: certificate chains
+	// repeat in every entry, so responses compress very well (9.6x measured on
+	// a synthetic 1000-entry response).
+	HTTPCompression *bool `yaml:"http_compression"`
 	// TiledBatchSize is obsolete and ignored. It once capped the entries a tiled
 	// log processed per poll; once batches were drained back-to-back it bounded
 	// nothing, and cutting torchwood's tile iterator short made it re-download
@@ -400,6 +407,11 @@ func validateConfig(config *Config) bool {
 	if config.General.Scanner.FastParser == nil {
 		fastParser := true
 		config.General.Scanner.FastParser = &fastParser
+	}
+
+	if config.General.Scanner.HTTPCompression == nil {
+		httpCompression := true
+		config.General.Scanner.HTTPCompression = &httpCompression
 	}
 
 	if config.General.Scanner.TiledBatchSize <= 0 {

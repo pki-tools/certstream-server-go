@@ -1,11 +1,16 @@
 package certificatetransparency
 
 import (
+	"compress/gzip"
+	"io"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/d-Rickyy-b/certstream-server-go/internal/config"
 )
 
 // Rate limiting is invisible from above: certificate-transparency-go retries 429
@@ -47,6 +52,18 @@ type rateLimitTransport struct {
 	base    http.RoundTripper
 	logURL  string
 	logName string
+	// noCompression is set when scanner.http_compression is false. The base
+	// transport then neither requests nor transparently decodes gzip.
+	noCompression bool
+}
+
+// HTTPCompressionEnabled reports whether log responses are requested gzipped.
+func HTTPCompressionEnabled() bool { return httpCompressionEnabled() }
+
+// httpCompressionEnabled reports scanner.http_compression, defaulting to on.
+func httpCompressionEnabled() bool {
+	p := config.AppConfig.General.Scanner.HTTPCompression
+	return p == nil || *p
 }
 
 func (t *rateLimitTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -54,12 +71,35 @@ func (t *rateLimitTransport) RoundTrip(req *http.Request) (*http.Response, error
 	// count has to be compared against. See fetchstats.go.
 	requested := requestedEntries(req)
 
+	if t.noCompression {
+		// With compression disabled the transport sends no Accept-Encoding at
+		// all, which RFC 9110 reads as "any coding is acceptable". Ask for
+		// identity explicitly. RoundTrippers must not modify the caller's
+		// request, hence the clone.
+		req = req.Clone(req.Context())
+		req.Header.Set("Accept-Encoding", "identity")
+	}
+
 	start := time.Now()
 	resp, err := t.base.RoundTrip(req)
 	latency := time.Since(start)
 
 	if err != nil || resp == nil {
 		return resp, err
+	}
+
+	if t.noCompression && resp.Body != nil && strings.EqualFold(resp.Header.Get("Content-Encoding"), "gzip") {
+		// A server that gzips regardless. With compression disabled the base
+		// transport passes such a body through still encoded, which would
+		// break JSON and tile decoding, so decode it here instead. Done before
+		// any other wrapping so the entry counter below sees plain JSON.
+		if gz, gzErr := gzip.NewReader(resp.Body); gzErr == nil {
+			resp.Body = &gzipBody{Reader: gz, underlying: resp.Body}
+			resp.Header.Del("Content-Encoding")
+			resp.Header.Del("Content-Length")
+			resp.ContentLength = -1
+			resp.Uncompressed = true
+		}
 	}
 
 	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
@@ -88,12 +128,28 @@ func newRateLimitTransport(logURL, logName string) http.RoundTripper {
 	base.MaxIdleConnsPerHost = 20
 	base.IdleConnTimeout = 90 * time.Second
 
+	// scanner.http_compression: false trades bandwidth for the CPU spent
+	// decompressing responses. See rateLimitTransport.RoundTrip.
+	noCompression := !httpCompressionEnabled()
+	base.DisableCompression = noCompression
+
 	// Route this log's fetches through its assigned egress proxy, when any are
 	// configured. Done on the base transport so rate-limit accounting above still
 	// sees every response.
 	applyProxy(base, logURL)
 
-	return &rateLimitTransport{base: base, logURL: logURL, logName: logName}
+	return &rateLimitTransport{base: base, logURL: logURL, logName: logName, noCompression: noCompression}
+}
+
+// gzipBody decodes a gzip response body and closes both layers on Close.
+type gzipBody struct {
+	*gzip.Reader
+	underlying io.ReadCloser
+}
+
+func (g *gzipBody) Close() error {
+	_ = g.Reader.Close()
+	return g.underlying.Close()
 }
 
 // NewRateLimitedClient returns an HTTP client that reports rate-limit responses

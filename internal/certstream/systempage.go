@@ -84,6 +84,8 @@ type systemPageData struct {
 
 	// Fast parser: certificates parsed by the standard library, with how many
 	// fell back to ct-go and how live re-checks against ct-go are going.
+	HTTPCompression bool
+
 	FastParser      certificatetransparency.FastParserStats
 	FastPercent     float64
 	FastParserKnown bool
@@ -261,7 +263,10 @@ const systemSectionMarkup = `
     <p class="sub">
       Entries actually returned per get-entries request. A log may return fewer
       than <code>batch_size</code> asks for; the shortfall costs extra round
-      trips, not lost entries. Worst fill first.
+      trips, not lost entries. Worst fill first. HTTP compression is
+      <b>{{if .HTTPCompression}}on{{else}}off{{end}}</b>
+      (<code>scanner.http_compression</code>){{if not .HTTPCompression}}: responses
+      arrive uncompressed, saving CPU at several times the bandwidth{{end}}.
     </p>
     {{if .FetchStats}}
     <table>
@@ -499,6 +504,7 @@ func buildSystemPageData() systemPageData {
 
 	data.Processed = data.Certs + data.Precerts
 
+	data.HTTPCompression = certificatetransparency.HTTPCompressionEnabled()
 	data.FastParser = certificatetransparency.GetFastParserStats()
 	if total := data.FastParser.Fast + data.FastParser.Fallbacks; total > 0 {
 		data.FastPercent = 100 * float64(data.FastParser.Fast) / float64(total)
