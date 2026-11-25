@@ -74,7 +74,15 @@ func (tw *tiledWorker) startDownloadingCerts(ctx context.Context) {
 	defer func() { tw.running = false }()
 	tw.mu.Unlock()
 
+	normURL := normalizeCtlogURL(tw.monitoringURL)
+
 	for {
+		// A paused or stopped log waits here, making no requests, until it is
+		// resumed. See logcontrol.go.
+		if !waitWhileHeld(ctx, normURL) {
+			return
+		}
+
 		workerErr := tw.runWorker(ctx)
 		if workerErr != nil {
 			if strings.Contains(workerErr.Error(), "no such host") {
@@ -165,8 +173,19 @@ func (tw *tiledWorker) runWorker(ctx context.Context) error {
 	ticker := time.NewTicker(tiledPollInterval)
 	defer ticker.Stop()
 
+	normURL := normalizeCtlogURL(tw.monitoringURL)
+
 	for {
-		caughtUp, drainErr := tw.drainBatch(ctx, client)
+		// Held here, keeping the client and its checkpoint, while paused or
+		// stopped; see logcontrol.go.
+		if !waitWhileHeld(ctx, normURL) {
+			return nil
+		}
+
+		fetchCtx, cancelFetch := heldContext(ctx, normURL)
+		caughtUp, drainErr := tw.drainBatch(fetchCtx, ctx, client)
+		cancelFetch()
+
 		if drainErr != nil {
 			return drainErr
 		}
@@ -194,7 +213,12 @@ func (tw *tiledWorker) runWorker(ctx context.Context) error {
 // caught up with the latest checkpoint. Batching bounds the work done per call so
 // the checkpoint is refreshed periodically on a fast-moving log; it deliberately
 // does not bound throughput.
-func (tw *tiledWorker) drainBatch(ctx context.Context, client *sunlight.Client) (caughtUp bool, err error) {
+//
+// fetchCtx bounds fetching: cancelling it - when the log is paused or stopped -
+// stops the iterator and dispatch. ctx is the worker's lifetime: entries
+// already handed to the parsing pool are finished on it, because ctIndex has
+// already moved past them and abandoning them would lose them for good.
+func (tw *tiledWorker) drainBatch(fetchCtx, ctx context.Context, client *sunlight.Client) (caughtUp bool, err error) {
 	// Reuse the last checkpoint while it still has entries we have not consumed.
 	// Re-fetching one per batch would multiply checkpoint traffic on a log that
 	// is far behind, and would pull every tile request up against the moment a
@@ -207,8 +231,13 @@ func (tw *tiledWorker) drainBatch(ctx context.Context, client *sunlight.Client) 
 	// tree would appear frozen, treeGrewAt would never advance, and the log
 	// would stall at that index.
 	if !hasFullTileToRead(tw.ctIndex, tw.treeSize) {
-		checkpoint, _, cpErr := client.Checkpoint(ctx)
+		checkpoint, _, cpErr := client.Checkpoint(fetchCtx)
 		if cpErr != nil {
+			if fetchCtx.Err() != nil {
+				// Cut short by a pause or shutdown, not a fault.
+				return false, nil
+			}
+
 			log.Printf("Could not get checkpoint for '%s': %s\n", tw.monitoringURL, cpErr)
 			RecordError(tw.monitoringURL, tw.name, ErrCatCheckpoint, cpErr.Error())
 			// Report caught-up so the caller backs off to the ticker rather than
@@ -303,14 +332,14 @@ func (tw *tiledWorker) drainBatch(ctx context.Context, client *sunlight.Client) 
 	cancelled := false
 
 dispatch:
-	for index, entry := range client.Entries(ctx, tw.tree, tw.ctIndex) {
+	for index, entry := range client.Entries(fetchCtx, tw.tree, tw.ctIndex) {
 		if entry == nil {
 			continue
 		}
 
 		select {
 		case jobs <- tiledJob{index: index, entry: entry}:
-		case <-ctx.Done():
+		case <-fetchCtx.Done():
 			cancelled = true
 			break dispatch
 		}
@@ -322,7 +351,7 @@ dispatch:
 	close(jobs)
 	wg.Wait()
 
-	if cancelled || ctx.Err() != nil {
+	if cancelled || fetchCtx.Err() != nil {
 		return false, nil
 	}
 

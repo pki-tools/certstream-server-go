@@ -137,7 +137,7 @@ section{scroll-margin-top:62px;margin-bottom:30px}
 {{end}}
 <script>
 ` + logStatusSortJS + `
-` + logStatusCatchupJS + `
+` + logStatusControlJS + `
 
 // Refresh without losing scroll position, which a meta refresh would discard
 // on a page this long. The sort itself is already persisted separately.
@@ -171,9 +171,9 @@ func renderSection(t *template.Template, data any) (template.HTML, error) {
 	return template.HTML(buf.String()), nil //nolint:gosec // our own template output
 }
 
-func overviewHandler(w http.ResponseWriter, _ *http.Request) {
+func overviewHandler(w http.ResponseWriter, r *http.Request) {
 	sys := buildSystemPageData()
-	logs := buildLogStatusPageData()
+	logs := buildLogStatusPageData(r)
 	errs := buildErrorsPageData()
 
 	data := overviewPageData{

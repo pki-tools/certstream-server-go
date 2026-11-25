@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/d-Rickyy-b/certstream-server-go/internal/certificatetransparency"
+	"github.com/d-Rickyy-b/certstream-server-go/internal/web"
 )
 
 func logStatusFuncs() template.FuncMap {
@@ -138,7 +139,8 @@ func logStatusFuncs() template.FuncMap {
 
 // logStatusTableMarkup is the sortable table on its own, shared by /log-status
 // and the combined /overview page.
-const logStatusTableMarkup = `<div class="wrap">
+const logStatusTableMarkup = `{{if not .ControlsAllowed}}<p class="ctl-note">{{if .ControlsConfigured}}Log controls are read-only from your address{{if .ViewerIP}} (<code>{{.ViewerIP}}</code>){{end}}. Permitted addresses are set in <code>general.log_controls.allowed_ips</code>.{{else}}Log controls are disabled. To enable them, list permitted addresses in <code>general.log_controls.allowed_ips</code>{{if .ViewerIP}} - this server sees you as <code>{{.ViewerIP}}</code>{{end}}.{{end}}</p>{{end}}
+<div class="wrap">
 <table id="logtable">
 <thead>
 <tr>
@@ -155,12 +157,14 @@ const logStatusTableMarkup = `<div class="wrap">
 </tr>
 </thead>
 <tbody>
+{{$deny := ""}}{{if not .ControlsConfigured}}{{$deny = "Log controls are disabled: set general.log_controls.allowed_ips"}}{{else if not .ControlsAllowed}}{{$deny = "Your address is not in general.log_controls.allowed_ips"}}{{end}}
 {{range .Logs}}
 <tr>
   <td data-sort="{{.Operator}}">{{.Operator}}</td>
   <td data-sort="{{.Name}}">{{.Name}}</td>
   <td data-sort="{{.Type}}">
     <span class="badge {{typeClass .Type}}">{{.Type}}</span>
+    {{if eq .State "paused"}}<span class="badge badge-paused" title="Ingestion paused by an operator; resumes where it left off">&#10074;&#10074; Paused</span>{{else if eq .State "stopped"}}<span class="badge badge-stopped" title="Ingestion stopped by an operator; stays stopped across restarts until resumed">&#9632; Stopped</span>{{end}}
     {{if isCatchupActive .CatchupUntil}}<span class="badge badge-catchup" title="Catch-up active for {{catchupRemaining .CatchupUntil}} more">&#9889; {{catchupRemaining .CatchupUntil}}</span>{{end}}
     {{if .Proxy}}<span class="badge badge-proxy" title="Fetched via egress proxy {{.Proxy}}">&#8644; {{.Proxy}}</span>{{end}}
   </td>
@@ -168,9 +172,19 @@ const logStatusTableMarkup = `<div class="wrap">
   <td class="num" data-sort="{{.TreeSize}}">{{if gt .TreeSize 0}}{{formatNumber .TreeSize}}{{else}}<span class="age">Pending</span>{{end}}</td>
   <td class="num {{behindClass .Behind}}" data-sort="{{.Behind}}">{{if gt .TreeSize 0}}{{if eq .Behind 0}}—{{else}}{{formatNumber .Behind}}{{end}}{{else}}<span class="age">—</span>{{end}}</td>
   <td class="num" data-sort="{{.RatePerSec}}">{{if gt .RatePerSec 0.0}}{{formatRate .RatePerSec}}{{else}}<span class="age">—</span>{{end}}</td>
-  <td class="{{etaClass .ETA}}" data-sort="{{etaSort .ETA .Behind}}">{{formatETA .ETA .Behind}}</td>
+  <td class="{{etaClass .ETA}}" data-sort="{{etaSort .ETA .Behind}}">{{if eq .State "running"}}{{formatETA .ETA .Behind}}{{else}}<span class="age">{{.State}}</span>{{end}}</td>
   <td class="age" data-sort="{{ageSort .TreeSizeAge}}">{{formatAge .TreeSizeAge}}</td>
-  <td><button class="catchup-btn" onclick="triggerCatchup(this,'{{.URL}}')" {{if isCatchupActive .CatchupUntil}}disabled{{end}}>{{if isCatchupActive .CatchupUntil}}Catching up…{{else}}Catch Up{{end}}</button></td>
+  <td class="ctls">
+    {{- if eq .State "running"}}
+    <button type="button" class="ctl ctl-catchup" aria-label="Catch up" title="{{if $deny}}{{$deny}}{{else if isCatchupActive .CatchupUntil}}Catching up for {{catchupRemaining .CatchupUntil}} more{{else}}Catch up: faster fetching for 10 minutes{{end}}" onclick="logControl(this,'{{.URL}}','catchup')"{{if or $deny (isCatchupActive .CatchupUntil)}} disabled{{end}}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9.5 1 3 9h4.2L6.5 15 13 7H8.8z"/></svg></button>
+    <button type="button" class="ctl ctl-pause" aria-label="Pause" title="{{or $deny "Pause: stop fetching now, resume later from the same place"}}" onclick="logControl(this,'{{.URL}}','pause')"{{if $deny}} disabled{{end}}><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="2.5" width="3" height="11" rx="1"/><rect x="9.5" y="2.5" width="3" height="11" rx="1"/></svg></button>
+    {{- else}}
+    <button type="button" class="ctl ctl-resume" aria-label="Resume" title="{{or $deny "Resume ingestion from where it stopped"}}" onclick="logControl(this,'{{.URL}}','resume')"{{if $deny}} disabled{{end}}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 2.5v11l9-5.5z"/></svg></button>
+    {{- end}}
+    {{- if ne .State "stopped"}}
+    <button type="button" class="ctl ctl-stop" aria-label="Stop" title="{{or $deny "Stop: halt ingestion and keep it halted across restarts"}}" onclick="logControl(this,'{{.URL}}','stop')"{{if $deny}} disabled{{end}}><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="3" width="10" height="10" rx="1.5"/></svg></button>
+    {{- end}}
+  </td>
 </tr>
 {{end}}
 </tbody>
@@ -186,7 +200,7 @@ const logStatusPageHeader = `
 </p>
 `
 
-// logStatusSortJS drives the sortable headers. logStatusCatchupJS is separate
+// logStatusSortJS drives the sortable headers. logStatusControlJS is separate
 // because /overview embeds the table and its sorting but reuses the same
 // catch-up handler alongside it.
 const logStatusSortJS = `
@@ -263,23 +277,30 @@ document.querySelectorAll('#logtable th.sortable').forEach(function (th) {
 
 `
 
-const logStatusCatchupJS = `function triggerCatchup(btn, url) {
-  btn.disabled = true;
-  btn.textContent = 'Sending…';
-  fetch('/log-status/catchup', {
+const logStatusControlJS = `function logControl(btn, url, action) {
+  if (action === 'stop' && !confirm('Stop ingesting from this log?\n\nIt stays stopped, across restarts, until you resume it.')) {
+    return;
+  }
+  var buttons = btn.closest('td').querySelectorAll('button.ctl');
+  for (var i = 0; i < buttons.length; i++) { buttons[i].disabled = true; }
+  var enable = function() {
+    for (var i = 0; i < buttons.length; i++) { buttons[i].disabled = false; }
+  };
+  fetch('/log-status/control', {
     method: 'POST',
-    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-    body: 'url=' + encodeURIComponent(url)
+    credentials: 'same-origin',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      // Required by the server: a cross-site page cannot send it.
+      'X-Certstream-Control': '1'
+    },
+    body: 'url=' + encodeURIComponent(url) + '&action=' + encodeURIComponent(action)
   }).then(function(r) {
-    if (r.ok) {
-      btn.textContent = 'Catching up…';
-    } else {
-      btn.disabled = false;
-      btn.textContent = 'Catch Up';
-    }
+    if (r.ok) { location.reload(); return; }
+    return r.text().then(function(t) { enable(); alert('Could not ' + action + ': ' + t.trim()); });
   }).catch(function() {
-    btn.disabled = false;
-    btn.textContent = 'Catch Up';
+    enable();
+    alert('Could not ' + action + ': the server could not be reached');
   });
 }
 `
@@ -321,9 +342,21 @@ th.sortable.sort-asc i{opacity:1}
 th.sortable.sort-asc i::after{content:"\25B2"}
 th.sortable.sort-desc i{opacity:1}
 th.sortable.sort-desc i::after{content:"\25BC"}
-button.catchup-btn{border:none;background:#3b82f6;color:#fff;font-size:0.6875rem;font-weight:600;padding:3px 10px;border-radius:6px;cursor:pointer;white-space:nowrap}
-button.catchup-btn:hover{background:#2563eb}
-button.catchup-btn:disabled{background:#93c5fd;cursor:default}
+.badge-paused{background:#e0e7ff;color:#3730a3}
+.badge-stopped{background:#fee2e2;color:#991b1b}
+td.ctls{white-space:nowrap;text-align:right}
+p.ctl-note{margin:0 0 12px;padding:8px 12px;border-radius:8px;background:#f8fafc;border:1px solid #e2e8f0;color:#475569;font-size:0.8125rem}
+p.ctl-note code{font-size:0.75rem;background:#eef2f7;padding:1px 5px;border-radius:4px}
+button.ctl{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;margin-left:3px;padding:0;border:1px solid #d1d5db;border-radius:6px;background:#fff;color:#4b5563;cursor:pointer;vertical-align:middle}
+button.ctl svg{width:14px;height:14px;fill:currentColor}
+button.ctl:hover:not(:disabled){border-color:currentColor}
+button.ctl:focus-visible{outline:2px solid #3b82f6;outline-offset:1px}
+button.ctl-catchup:hover:not(:disabled){color:#ca8a04;background:#fefce8}
+button.ctl-pause:hover:not(:disabled){color:#4338ca;background:#eef2ff}
+button.ctl-resume{color:#15803d}
+button.ctl-resume:hover:not(:disabled){background:#f0fdf4}
+button.ctl-stop:hover:not(:disabled){color:#b91c1c;background:#fef2f2}
+button.ctl:disabled{opacity:.4;cursor:not-allowed}
 `
 
 var logStatusTmpl = template.Must(template.New("logstatus").Funcs(logStatusFuncs()).
@@ -337,7 +370,7 @@ var logStatusTmpl = template.Must(template.New("logstatus").Funcs(logStatusFuncs
 <style>` + logStatusSectionCSS + `</style>
 </head>
 <body>` + logStatusPageHeader + logStatusTableMarkup +
-		`<script>` + logStatusSortJS + logStatusCatchupJS + `</script>` + `</body>
+		`<script>` + logStatusSortJS + logStatusControlJS + `</script>` + `</body>
 </html>`))
 
 // logStatusTableTmpl renders only the table, for embedding in /overview.
@@ -348,40 +381,50 @@ type logStatusPageData struct {
 	GeneratedAt string
 	TotalLogs   int
 	Logs        []certificatetransparency.LogStatusSnapshot
+
+	// ControlsAllowed is whether this viewer may use the log controls;
+	// ControlsConfigured whether anyone may. They decide whether the controls
+	// render enabled, and what the tooltip says when they are not.
+	ControlsAllowed    bool
+	ControlsConfigured bool
+	// ViewerIP is the address the server attributes this request to - what
+	// belongs in allowed_ips. Behind a proxy without real_ip it is the proxy's,
+	// which is exactly what an operator needs to notice.
+	ViewerIP string
 }
 
 // catchupDuration is how long catch-up mode stays active after a trigger.
 const catchupDuration = 10 * time.Minute
 
-// catchupHandler accepts a POST with form field "url" and activates catch-up mode
-// for that log for catchupDuration. It responds 204 on success, 400 on bad input,
-// 404 if the log is not known.
+// catchupHandler is the original catch-up endpoint, kept for anything that
+// calls it directly. It applies the same checks as controlHandler.
 func catchupHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if !authorizeControl(w, r) {
 		return
 	}
+
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	rawURL := strings.TrimSpace(r.FormValue("url"))
-	if rawURL == "" {
-		http.Error(w, "url required", http.StatusBadRequest)
+
+	normURL, ok := controlTarget(w, r)
+	if !ok {
 		return
 	}
-	normURL := certificatetransparency.NormalizeCtlogURL(rawURL)
-	if !certificatetransparency.IsKnownLog(normURL) {
-		http.Error(w, "unknown log", http.StatusNotFound)
+
+	if state := certificatetransparency.GetLogState(normURL); state != certificatetransparency.LogRunning {
+		http.Error(w, fmt.Sprintf("log is %s; resume it first", state), http.StatusConflict)
 		return
 	}
+
 	certificatetransparency.TriggerCatchup(normURL, catchupDuration)
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // buildLogStatusPageData gathers everything the page renders, split out so the
 // combined /overview page can reuse it.
-func buildLogStatusPageData() logStatusPageData {
+func buildLogStatusPageData(r *http.Request) logStatusPageData {
 
 	logs := certificatetransparency.GetLogStatuses()
 
@@ -389,13 +432,22 @@ func buildLogStatusPageData() logStatusPageData {
 		GeneratedAt: time.Now().UTC().Format("2006-01-02 15:04:05 UTC"),
 		TotalLogs:   len(logs),
 		Logs:        logs,
+
+		ControlsAllowed:    controlsAllowedFor(r),
+		ControlsConfigured: !controlAllowList().Empty(),
+	}
+
+	if r != nil {
+		if ip := web.ClientIP(r); ip != nil {
+			data.ViewerIP = ip.String()
+		}
 	}
 
 	return data
 }
 
-func logStatusHandler(w http.ResponseWriter, _ *http.Request) {
-	data := buildLogStatusPageData()
+func logStatusHandler(w http.ResponseWriter, r *http.Request) {
+	data := buildLogStatusPageData(r)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := logStatusTmpl.Execute(w, data); err != nil {

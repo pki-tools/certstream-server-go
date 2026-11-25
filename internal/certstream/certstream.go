@@ -68,6 +68,8 @@ func NewCertstreamServer(config config.Config) (*Certstream, error) {
 
 	// Register the catch-up trigger endpoint (POST only)
 	ui.RegisterHTTPHandler("/log-status/catchup", catchupHandler)
+	// Pause, stop, resume and catch up; IP- and header-guarded, see logcontrolhandler.go.
+	ui.RegisterHTTPHandler("/log-status/control", controlHandler)
 
 	// Register the CCADB CA owners dashboard
 	ui.RegisterHTTPHandler("/ccadb", ccadbHandler)

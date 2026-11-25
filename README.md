@@ -286,6 +286,41 @@ Colour coding: green = live, amber = minutes behind, red = hours behind.
 
 All data is in-memory only and resets on server restart.
 
+### Controlling ingestion
+
+Each row ends with small controls:
+
+| Icon | Action | Effect |
+|---|---|---|
+| ⚡ | **Catch up** | Fetches faster (larger batches, more parallel requests and parsing workers) for 10 minutes. |
+| ⏸ | **Pause** | Stops fetching now. Resuming continues from where it stopped. **Not** remembered across a restart: a restart resumes every paused log. |
+| ⏹ | **Stop** | Like pause, but **remembered across restarts** until resumed — for a log you do not want ingested at all for now. Saved in `general.log_controls.state_file`. Asks for confirmation. |
+| ▶ | **Resume** | Restarts a paused or stopped log from where it left off. |
+
+Pausing or stopping loses nothing: entries already fetched are finished before the worker parks, and resuming continues from the next one. A held log makes no requests at all. Note that a log stopped for a long time resumes with a backlog of everything published meanwhile.
+
+**The controls are off until you allow addresses for them:**
+
+```yaml
+general:
+  log_controls:
+    allowed_ips: ["203.0.113.9", "10.0.0.0/8"]   # IPs or CIDRs
+    state_file: "./log_controls.json"            # default
+```
+
+- With `allowed_ips` empty — the default — every control is refused, from any address including localhost. The controls change what the server ingests, so they are never open by default. This includes **Catch up**, which used to be open to anyone who could reach the page.
+- The page shows its controls greyed out to anyone not allowed, with a note giving **the address the server sees for them** — which is the one to put in `allowed_ips`.
+- **Behind a reverse proxy**, set `real_ip: true` on the listener serving the UI (`webserver.real_ip`, or `webserver.ui.real_ip` with a separate UI listener). Otherwise every request appears to come from the proxy, and allowing the proxy's address would allow everyone. The note on the page makes this visible: if it shows your proxy's address, `real_ip` is off.
+- Requests must also carry an `X-Certstream-Control` header. An address check alone is not enough: any website you visit could make your browser — at an allowed address — submit a form to these endpoints. A cross-site page cannot add a custom header, so the controls work only from this server's own pages, or deliberately:
+
+```bash
+curl -X POST -H 'X-Certstream-Control: 1' \
+  --data-urlencode 'url=https://ct.example.com/log' --data-urlencode 'action=pause' \
+  http://localhost:8080/log-status/control
+```
+
+`action` is one of `catchup`, `pause`, `stop` or `resume`. Success is `204`; a refusal is `403` with the reason, and an action that does not apply to the log's current state (pausing a stopped log, catching up a paused one) is `409`.
+
 ---
 
 ## CCADB CA owners dashboard
@@ -673,6 +708,8 @@ These settings control how aggressively the server fetches entries from CT logs.
 | `scanner.batch_size` | `1000` | Entries requested per HTTP `get-entries` request for regular (RFC 6962) logs; this is the spec maximum. Logs may return fewer, in which case the remainder is re-requested — see [What `batch_size` actually controls](#what-batch_size-actually-controls). |
 | `scanner.parallel_fetch` | `1` | Concurrent `get-entries` requests per regular log. Increasing to `2` roughly doubles catch-up throughput; values above `3` risk 429 rate-limiting from log operators. |
 | `scanner.num_workers` | cores, capped at 4 | Certificate parsing goroutines **per log**. This is the only parallelism that applies to parsing, and it costs the operator nothing — it issues no extra requests, so unlike `parallel_fetch` it cannot attract rate limiting. See [Only one core is busy](#only-one-core-is-busy). |
+| `log_controls.allowed_ips` | `[]` | Addresses (IPs or CIDRs) allowed to use the log-status controls — catch up, pause, stop, resume. **Empty disables them.** Behind a proxy, set `real_ip` on the UI listener. See [Controlling ingestion](#controlling-ingestion). |
+| `log_controls.state_file` | `./log_controls.json` | Where stopped logs are recorded so they stay stopped across restarts. |
 | `scanner.fast_parser` | `true` | Parse certificates with Go's standard library first, falling back to certificate-transparency-go for any certificate it refuses. Roughly 1.3–1.7× faster parsing with identical output. `/system` shows the share parsed fast, the fallbacks, and a live check that re-parses one certificate in 1,000 with ct-go and counts any difference — which should stay at 0. Set `false` to parse everything with ct-go. |
 | `scanner.http_compression` | `true` | Ask CT logs for gzip-compressed responses. Setting `false` saves the CPU spent decompressing — about 17% in one production profile, nearly all of it regular-log `get-entries` responses — at the cost of **several times the bandwidth** on those logs: every entry repeats its certificate chain, so responses compress very well (9.6× on a synthetic 1,000-entry response; real logs will vary). Worth it only when CPU is the constraint and bandwidth is not. With it off the client sends `Accept-Encoding: identity`, and still decodes gzip from any server that sends it regardless. |
 | `scanner.tiled_batch_size` | — | **Obsolete, ignored.** Cutting a tiled log's tile iterator short after this many entries made it re-download each 50-tile window about 20 times — on a backlogged tiled log, far more CPU than parsing. Still accepted so existing configs load. |

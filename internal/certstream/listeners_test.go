@@ -6,6 +6,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -142,6 +144,38 @@ func TestSplitListeners(t *testing.T) {
 	}
 	if code, _ := get(t, ws+"/log-status"); code != http.StatusNotFound {
 		t.Errorf("websocket listener /log-status returned %d, want 404", code)
+	}
+
+	// The log controls are routed with the dashboards, and their guards apply
+	// end to end: with no allow-list configured a well-formed request is
+	// refused (403), not missing (404).
+	controlPost := func(base string) int {
+		req, err := http.NewRequest(http.MethodPost, base+"/log-status/control",
+			strings.NewReader("url=https%3A%2F%2Fct.example.com%2Flog&action=pause"))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set(controlHeader, "1")
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+
+		return resp.StatusCode
+	}
+
+	controlAllowOnce = sync.Once{}
+
+	if code := controlPost(ui); code != http.StatusForbidden {
+		t.Errorf("UI /log-status/control with no allow-list returned %d, want 403", code)
+	}
+
+	if code := controlPost(ws); code != http.StatusNotFound {
+		t.Errorf("websocket listener /log-status/control returned %d, want 404", code)
 	}
 
 	// Websockets stay on the websocket listener only.

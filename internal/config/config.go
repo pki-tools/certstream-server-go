@@ -78,6 +78,19 @@ type ProxyConfig struct {
 	Token string `yaml:"token"`
 }
 
+// LogControlOptions configures operator control of ingestion from the UI.
+type LogControlOptions struct {
+	// AllowedIPs are the client addresses (IPs or CIDRs) permitted to pause,
+	// stop, resume or catch up a log. Empty disables the controls entirely:
+	// they change what the server ingests, so they are never open by default.
+	// Behind a reverse proxy, set real_ip on the listener serving the UI so
+	// the client's address is seen rather than the proxy's.
+	AllowedIPs []string `yaml:"allowed_ips"`
+	// StateFile persists which logs are stopped, so they stay stopped across
+	// restarts. Paused logs are not persisted.
+	StateFile string `yaml:"state_file"`
+}
+
 type DashboardOptions struct {
 	// Enabled turns the /dashboard endpoint and its background sampler on.
 	Enabled bool `yaml:"enabled"`
@@ -123,8 +136,11 @@ type Config struct {
 		// Pprof exposes Go's profiling endpoints under /debug/pprof on the web UI
 		// listener. Off by default: the profiles reveal internals and capturing one
 		// briefly costs CPU, so restrict the listener before enabling it.
-		Pprof       bool  `yaml:"pprof"`
-		DropOldLogs *bool `yaml:"drop_old_logs"`
+		Pprof bool `yaml:"pprof"`
+		// LogControls governs the pause, stop, resume and catch-up actions on
+		// the log-status page.
+		LogControls LogControlOptions `yaml:"log_controls"`
+		DropOldLogs *bool             `yaml:"drop_old_logs"`
 		Recovery    struct {
 			Enabled     bool   `yaml:"enabled"`
 			StartAtHead bool   `yaml:"start_at_head"`
@@ -402,6 +418,19 @@ func validateConfig(config *Config) bool {
 	// workers, while cheap, are not free.
 	if config.General.Scanner.NumWorkers <= 0 {
 		config.General.Scanner.NumWorkers = defaultNumWorkers()
+	}
+
+	for _, entry := range config.General.LogControls.AllowedIPs {
+		if net.ParseIP(entry) == nil {
+			if _, _, err := net.ParseCIDR(entry); err != nil {
+				log.Fatalln("Invalid IP or CIDR in general.log_controls.allowed_ips: ", entry)
+				return false
+			}
+		}
+	}
+
+	if config.General.LogControls.StateFile == "" {
+		config.General.LogControls.StateFile = "./log_controls.json"
 	}
 
 	if config.General.Scanner.FastParser == nil {

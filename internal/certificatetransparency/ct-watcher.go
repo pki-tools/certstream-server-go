@@ -127,6 +127,12 @@ func (w *Watcher) Start() {
 		go metrics.SaveCertIndexesAtInterval(time.Second*30, ctIndexFilePath) // save indexes every X seconds
 	}
 
+	// Restore operator-stopped logs before any worker starts, so a stopped log
+	// never makes a request.
+	if err := LoadLogControls(config.AppConfig.General.LogControls.StateFile); err != nil {
+		log.Printf("Could not load log control state from '%s': %s\n", config.AppConfig.General.LogControls.StateFile, err)
+	}
+
 	// initialize the watcher with currently available logs
 	w.updateLogs()
 
@@ -472,7 +478,15 @@ func (w *worker) startDownloadingCerts(ctx context.Context) {
 	defer func() { w.running = false }()
 	w.mu.Unlock()
 
+	normURL := normalizeCtlogURL(w.ctURL)
+
 	for {
+		// A paused or stopped log waits here, making no requests, until it is
+		// resumed. See logcontrol.go.
+		if !waitWhileHeld(ctx, normURL) {
+			return
+		}
+
 		log.Printf("Starting worker for CT log: %s\n", w.ctURL)
 		workerErr := w.runWorker(ctx)
 		if workerErr != nil {
@@ -490,13 +504,13 @@ func (w *worker) startDownloadingCerts(ctx context.Context) {
 				RecordError(w.ctURL, w.name, ErrCatConnection, workerErr.Error())
 				return
 			} else if errors.Is(workerErr, errScannerRestart) {
-				// Planned restart to pick up catch-up settings; no sleep needed.
+				// Planned restart: catch-up settings changed, or the log was
+				// paused or stopped and will wait at the top of the loop.
 				select {
 				case <-ctx.Done():
 					log.Printf("Context was cancelled; Stopping worker for '%s'\n", w.ctURL)
 					return
 				default:
-					log.Printf("Worker for '%s' restarting for catch-up\n", w.ctURL)
 					continue
 				}
 			}
@@ -607,8 +621,14 @@ func (w *worker) runWorker(ctx context.Context) error {
 		}
 	}
 
-	// Inner scan context: cancelled by the outer context OR by a restart signal.
-	scanCtx, scanCancel := context.WithCancel(ctx)
+	// Inner scan context: cancelled by the outer context, by a catch-up restart
+	// signal, or by the log being paused or stopped. Only fetching stops on
+	// it: scanEntries hands on every entry already fetched, on ctx, so pausing
+	// loses nothing.
+	heldCtx, heldCancel := heldContext(ctx, normURL)
+	defer heldCancel()
+
+	scanCtx, scanCancel := context.WithCancel(heldCtx)
 	defer scanCancel()
 
 	if restartCh := GetScanRestartCh(normURL); restartCh != nil {
@@ -628,8 +648,8 @@ func (w *worker) runWorker(ctx context.Context) error {
 		Continuous:    true,
 	}, numWorkers, config.AppConfig.General.BufferSizes.CTLog)
 
-	// A cancelled scan context with a live outer context is a planned restart
-	// to pick up catch-up settings. This has to be checked whatever scanErr is:
+	// A cancelled scan context with a live outer context is a planned restart:
+	// to pick up catch-up settings, or because the log was paused or stopped. This has to be checked whatever scanErr is:
 	// scanner.Fetcher.Run returns nil when its context is cancelled, so the
 	// previous check - made only when the scan returned an error - never fired.
 	// The restart then took the error path instead: a misleading "sleeping due

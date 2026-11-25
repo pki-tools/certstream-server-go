@@ -193,7 +193,7 @@ func drainTestLog(tb testing.TB, tl *testTiledLog, srvURL string, hc *http.Clien
 			tb.Fatalf("no progress: ctIndex=%d of %d", tw.ctIndex, tl.tree.N)
 		}
 
-		if _, err := tw.drainBatch(ctx, client); err != nil {
+		if _, err := tw.drainBatch(ctx, ctx, client); err != nil {
 			tb.Fatalf("drainBatch: %v", err)
 		}
 	}
