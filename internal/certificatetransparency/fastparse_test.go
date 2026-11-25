@@ -215,6 +215,20 @@ func syntheticCorpus(t *testing.T) []corpusCert {
 	serial := int64(1000)
 
 	for tname, tmpl := range templates {
+		// Since Go 1.24 (x509usepolicies=1) CreateCertificate encodes Policies
+		// and ignores PolicyIdentifiers, so set both or the certificate carries
+		// no policies at all - which these templates silently did at first.
+		for _, oid := range tmpl.PolicyIdentifiers {
+			ints := make([]uint64, len(oid))
+			for i, v := range oid {
+				ints[i] = uint64(v)
+			}
+
+			if o, err := stdx509.OIDFromInts(ints); err == nil {
+				tmpl.Policies = append(tmpl.Policies, o)
+			}
+		}
+
 		for kname, key := range keys {
 			serial++
 
@@ -236,6 +250,13 @@ func syntheticCorpus(t *testing.T) []corpusCert {
 			der, err := stdx509.CreateCertificate(rand.Reader, tmpl, tmpl, pub, key)
 			if err != nil {
 				t.Fatalf("synthetic %s/%s: %v", tname, kname, err)
+			}
+
+			if len(tmpl.PolicyIdentifiers) > 0 {
+				parsed, err := stdx509.ParseCertificate(der)
+				if err != nil || len(parsed.Policies) != len(tmpl.PolicyIdentifiers) {
+					t.Fatalf("synthetic %s/%s: policies were not encoded", tname, kname)
+				}
 			}
 
 			out = append(out, corpusCert{name: "synthetic:" + tname + "/" + kname, der: der})
