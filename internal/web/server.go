@@ -53,63 +53,101 @@ func (ws *WebServer) RegisterPrometheus(url string, callback func(w io.Writer, e
 	})
 }
 
-// IPWhitelist returns a middleware that checks if the IP of the client is in the whitelist.
-func IPWhitelist(whitelist []string) func(next http.Handler) http.Handler {
-	// build a list of whitelisted IPs and CIDRs
-	log.Println("Building IP whitelist...")
+// ClientIP returns the address of the client making r, or nil if it cannot be
+// determined.
+//
+// r.RemoteAddr is normally "ip:port", but chi's RealIP middleware - which
+// real_ip enables - replaces it with the bare IP taken from X-Forwarded-For or
+// a similar header. Parsing it only with net.SplitHostPort, as the whitelist
+// used to, fails on that bare form: behind a reverse proxy with real_ip and a
+// whitelist both set, every request was answered 500 Internal Server Error.
+func ClientIP(r *http.Request) net.IP {
+	host := r.RemoteAddr
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
 
-	var ipList []net.IP
-	var cidrList []net.IPNet
+	return net.ParseIP(host)
+}
 
-	for _, element := range whitelist {
-		_, ipNet, err := net.ParseCIDR(element)
-		if err != nil {
-			var ip net.IP
-			if ip = net.ParseIP(element); ip == nil {
-				log.Println("Invalid IP in metrics whitelist: ", element)
+// IPAllowList matches client addresses against a set of IPs and CIDRs.
+type IPAllowList struct {
+	ips  []net.IP
+	nets []net.IPNet
+}
 
-				continue
-			}
+// NewIPAllowList parses entries, returning those it could not parse.
+func NewIPAllowList(entries []string) (*IPAllowList, []string) {
+	l := &IPAllowList{}
 
-			ipList = append(ipList, ip)
+	var invalid []string
 
+	for _, entry := range entries {
+		if _, ipNet, err := net.ParseCIDR(entry); err == nil {
+			l.nets = append(l.nets, *ipNet)
 			continue
 		}
 
-		cidrList = append(cidrList, *ipNet)
+		if ip := net.ParseIP(entry); ip != nil {
+			l.ips = append(l.ips, ip)
+			continue
+		}
+
+		invalid = append(invalid, entry)
 	}
 
-	log.Println("IP whitelist: ", ipList)
-	log.Println("CIDR whitelist: ", cidrList)
+	return l, invalid
+}
+
+// Empty reports whether the list admits nothing.
+func (l *IPAllowList) Empty() bool {
+	return l == nil || (len(l.ips) == 0 && len(l.nets) == 0)
+}
+
+// Contains reports whether ip is in the list. A nil ip is never contained.
+func (l *IPAllowList) Contains(ip net.IP) bool {
+	if l == nil || ip == nil {
+		return false
+	}
+
+	for _, n := range l.nets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+
+	for _, allowed := range l.ips {
+		if allowed.Equal(ip) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// IPWhitelist returns a middleware that checks if the IP of the client is in the whitelist.
+func IPWhitelist(whitelist []string) func(next http.Handler) http.Handler {
+	log.Println("Building IP whitelist...")
+
+	allow, invalid := NewIPAllowList(whitelist)
+	for _, entry := range invalid {
+		log.Println("Invalid IP in whitelist: ", entry)
+	}
+
+	log.Println("IP whitelist: ", allow.ips)
+	log.Println("CIDR whitelist: ", allow.nets)
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// if the whitelist is empty, just continue
-			if len(ipList) == 0 && len(cidrList) == 0 {
+			if allow.Empty() {
 				next.ServeHTTP(w, r)
 				return
 			}
 
-			ipString, _, err := net.SplitHostPort(r.RemoteAddr)
-			if err != nil {
-				http.Error(w, "InternalServerError", http.StatusInternalServerError)
+			if allow.Contains(ClientIP(r)) {
+				next.ServeHTTP(w, r)
 				return
-			}
-
-			ip := net.ParseIP(ipString)
-
-			for _, cidr := range cidrList {
-				if cidr.Contains(ip) {
-					next.ServeHTTP(w, r)
-					return
-				}
-			}
-
-			for _, whitelistedIP := range ipList {
-				if whitelistedIP.Equal(ip) {
-					next.ServeHTTP(w, r)
-					return
-				}
 			}
 
 			log.Printf("IP %s not in whitelist, rejecting request\n", r.RemoteAddr)
